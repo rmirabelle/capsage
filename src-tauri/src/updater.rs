@@ -65,7 +65,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
     false
 }
 
-async fn fetch_latest() -> Result<GitHubRelease> {
+async fn fetch_latest() -> Result<Option<GitHubRelease>> {
     let response = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .build()?
@@ -75,12 +75,16 @@ async fn fetch_latest() -> Result<GitHubRelease> {
         .send()
         .await
         .context("network error")?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
     if !response.status().is_success() {
         return Err(anyhow!("GitHub returned {}", response.status()));
     }
     response
         .json()
         .await
+        .map(Some)
         .context("malformed GitHub release data")
 }
 
@@ -98,7 +102,9 @@ fn installer_asset(assets: &[GitHubAsset]) -> Option<&GitHubAsset> {
 #[tauri::command]
 pub async fn check_for_update() -> Result<Option<UpdateInfo>, String> {
     let current = current_version().to_string();
-    let release = fetch_latest().await.map_err(|error| error.to_string())?;
+    let Some(release) = fetch_latest().await.map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
     let latest = release.tag_name.trim_start_matches('v').to_string();
     if !is_newer(&latest, &current) {
         return Ok(None);
