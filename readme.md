@@ -79,7 +79,8 @@ cargo clippy --all-targets -- -D warnings
 CapSage updates are published as releases in the public
 [`rmirabelle/capsage`](https://github.com/rmirabelle/capsage) repository. The app
 uses GitHub's unauthenticated `releases/latest` API, so no access token or secret
-is embedded in the executable.
+is embedded in the executable. Read the complete
+[release playbook](docs/RELEASING.md) before preparing or publishing a release.
 
 1. Synchronize the version:
 
@@ -95,11 +96,13 @@ is embedded in the executable.
    .\publish.ps1
    ```
 
-The publish script validates all version declarations, builds the NSIS bundle,
-pushes the release commit and annotated version tag, and creates a GitHub release
-with a clean `CapSage_VERSION_x64-setup.exe` asset name. Published releases are
-reduced to the new current release after publishing succeeds; superseded releases
-and their tags are deleted because CapSage never rolls back through the updater.
+The publish script validates all version declarations and XSage installer
+invariants, builds the NSIS bundle, pushes the release commit and annotated
+version tag, and creates a GitHub release with a clean
+`CapSage_VERSION_x64-setup.exe` asset name. Published releases are reduced to the
+new current release only after the new release and updater endpoint are verified;
+superseded releases and their tags are deleted because CapSage never rolls back
+through the updater.
 
 ## Project layout
 
