@@ -42,6 +42,7 @@ Press the global capture shortcut from any application, capture the active windo
 - Tray-only startup with single-click restore and styled tray menu
 - Help menu and About dialog
 - Silent update check on startup with in-app installer download and progress
+- Per-user Windows installation following the shared XSage installer protocol
 
 ## Run from source
 

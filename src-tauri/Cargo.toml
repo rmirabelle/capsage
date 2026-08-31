@@ -1,6 +1,6 @@
 [package]
 name = "capsage"
-version = "0.1.0"
+version = "0.1.1"
 description = "A focused Windows screenshot and callout editor"
 authors = ["Rob Mirabelle"]
 edition = "2021"
