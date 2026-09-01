@@ -1,27 +1,13 @@
-import { CaretDown, Check } from "@phosphor-icons/react";
+import { CaretDown, Check, Palette, PencilSimple } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import {
   ACTIVE_CAPTURE_STYLE_KEY,
   CAPTURE_STYLES_KEY,
   DEFAULT_CAPTURE_STYLE,
+  loadCaptureStyles,
   type CaptureStyle
 } from "../editor/style";
 import { StyleDialog } from "./StyleDialog";
-
-function loadCaptureStyles(): CaptureStyle[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(CAPTURE_STYLES_KEY) ?? "[]");
-    if (!Array.isArray(parsed)) return [{ ...DEFAULT_CAPTURE_STYLE }];
-    const saved = parsed
-      .filter((style): style is Partial<CaptureStyle> & { id: string; name: string } =>
-        Boolean(style && typeof style.id === "string" && typeof style.name === "string"))
-      .map((style) => ({ ...DEFAULT_CAPTURE_STYLE, ...style }));
-    const custom = saved.filter((style) => style.id !== DEFAULT_CAPTURE_STYLE.id);
-    return [{ ...DEFAULT_CAPTURE_STYLE }, ...custom];
-  } catch {
-    return [{ ...DEFAULT_CAPTURE_STYLE }];
-  }
-}
 
 function StyleSwatches({ style }: { style: CaptureStyle }) {
   return (
@@ -37,12 +23,14 @@ function CaptureStyleDropdown({
   styles,
   value,
   displayStyle,
-  onChange
+  onChange,
+  onEdit
 }: {
   styles: CaptureStyle[];
   value: string;
   displayStyle: CaptureStyle;
   onChange: (id: string) => void;
+  onEdit: (style: CaptureStyle) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
@@ -69,7 +57,7 @@ function CaptureStyleDropdown({
       <button
         type="button"
         className="capture-style-select-trigger"
-        aria-haspopup="listbox"
+        aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
@@ -78,25 +66,41 @@ function CaptureStyleDropdown({
         <CaretDown size={13} weight="bold" />
       </button>
       {open && (
-        <div className="capture-style-select-menu" role="listbox" aria-label="Capture style">
+        <div className="capture-style-select-menu" role="menu" aria-label="Capture styles">
           {styles.map((style) => {
             const isSelected = style.id === value;
             return (
-              <button
-                type="button"
+              <div
                 key={style.id}
-                className={isSelected ? "selected" : ""}
-                role="option"
-                aria-selected={isSelected}
-                onClick={() => {
-                  onChange(style.id);
-                  setOpen(false);
-                }}
+                className={`capture-style-option ${isSelected ? "selected" : ""}`}
               >
-                <StyleSwatches style={style} />
-                <span className="capture-style-name">{style.name}</span>
-                {isSelected && <Check size={14} weight="bold" />}
-              </button>
+                <button
+                  type="button"
+                  className="capture-style-option-select"
+                  role="menuitemradio"
+                  aria-checked={isSelected}
+                  onClick={() => {
+                    onChange(style.id);
+                    setOpen(false);
+                  }}
+                >
+                  <StyleSwatches style={style} />
+                  <span className="capture-style-name">{style.name}</span>
+                  {isSelected && <Check size={14} weight="bold" />}
+                </button>
+                <button
+                  type="button"
+                  className="capture-style-option-edit"
+                  aria-label={`Edit ${style.name}`}
+                  title={`Edit ${style.name}`}
+                  onClick={() => {
+                    onEdit(style);
+                    setOpen(false);
+                  }}
+                >
+                  <PencilSimple size={14} />
+                </button>
+              </div>
             );
           })}
         </div>
@@ -175,10 +179,11 @@ function StyleNameDialog({
 interface Props {
   hasCapture: boolean;
   captureSession: number;
+  initialStyle: CaptureStyle;
   onStyleChange: (style: CaptureStyle) => void;
 }
 
-export function CaptureStyleToolbar({ hasCapture, captureSession, onStyleChange }: Props) {
+export function CaptureStyleToolbar({ hasCapture, captureSession, initialStyle, onStyleChange }: Props) {
   const [styles, setStyles] = useState<CaptureStyle[]>(loadCaptureStyles);
   const [activeStyleId, setActiveStyleId] = useState(() =>
     localStorage.getItem(ACTIVE_CAPTURE_STYLE_KEY) ?? DEFAULT_CAPTURE_STYLE.id
@@ -191,7 +196,15 @@ export function CaptureStyleToolbar({ hasCapture, captureSession, onStyleChange 
   const captureStyle = appliedStyle ?? activeStyle;
 
   useEffect(() => onStyleChange(captureStyle), [captureStyle, onStyleChange]);
-  useEffect(() => setAppliedStyle(null), [captureSession]);
+  useEffect(() => {
+    const savedStyle = styles.find((style) => style.id === initialStyle.id);
+    if (savedStyle && JSON.stringify(savedStyle) === JSON.stringify(initialStyle)) {
+      setActiveStyleId(savedStyle.id);
+      setAppliedStyle(null);
+    } else {
+      setAppliedStyle({ ...initialStyle });
+    }
+  }, [captureSession]);
   useEffect(() => {
     if (!hasCapture) setAppliedStyle(null);
   }, [hasCapture]);
@@ -250,14 +263,14 @@ export function CaptureStyleToolbar({ hasCapture, captureSession, onStyleChange 
   return (
     <>
       <div className="style-toolbar">
-        <span className="style-toolbar-label">Capture style</span>
+        <span className="style-toolbar-label"><Palette size={15} weight="duotone" /> Style</span>
         <CaptureStyleDropdown
           styles={styles}
           value={activeStyle.id}
           displayStyle={captureStyle}
           onChange={selectStyle}
+          onEdit={(style) => setStyleDraft({ ...style })}
         />
-        <button className="edit-style-button" onClick={() => setStyleDraft({ ...captureStyle })}>Edit Style</button>
         {appliedStyle && <span className="capture-style-override">Capture only</span>}
       </div>
       {styleDraft && (

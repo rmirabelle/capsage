@@ -66,11 +66,7 @@ export function SaveDialog({ settings, sourceWidth, sourceHeight, onCancel, onSa
         </header>
 
         <div className="save-dialog-body">
-          <section className="save-dialog-section" aria-labelledby="save-format-label">
-            <div className="save-dialog-section-heading">
-              <h3 id="save-format-label">File format</h3>
-              <span>Used for this and future saves</span>
-            </div>
+          <section className="save-dialog-section">
             <div className="save-format-options" role="radiogroup" aria-label="File format">
               <button
                 className={`save-format-option ${draft.format === "png" ? "selected" : ""}`}
@@ -95,11 +91,7 @@ export function SaveDialog({ settings, sourceWidth, sourceHeight, onCancel, onSa
             </div>
           </section>
 
-          <section className="save-dialog-section" aria-labelledby="save-size-label">
-            <div className="save-dialog-section-heading">
-              <h3 id="save-size-label">Maximum dimensions</h3>
-              <span>Leave blank to keep the original size</span>
-            </div>
+          <section className="save-dialog-section">
             <div className="save-size-fields">
               <label>
                 <span>Maximum width</span>

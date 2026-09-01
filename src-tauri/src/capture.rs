@@ -25,7 +25,13 @@ pub fn capture_active_window() -> Result<CaptureResult, String> {
 }
 
 #[tauri::command]
-pub async fn start_region_selection(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn start_region_selection(
+    app: tauri::AppHandle,
+    width: Option<u32>,
+    height: Option<u32>,
+    x: Option<i32>,
+    y: Option<i32>,
+) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         #[cfg(debug_assertions)]
@@ -36,7 +42,7 @@ pub async fn start_region_selection(app: tauri::AppHandle) -> Result<(), String>
                 .map_err(|error| format!("Could not reset the region selector: {error}"))?;
         }
 
-        let (x, y, width, height) = windows_capture::initial_selector_bounds()?;
+        let (x, y, width, height) = windows_capture::initial_selector_bounds(width, height, x, y)?;
 
         let selector = WebviewWindowBuilder::new(
             &app,
@@ -46,7 +52,7 @@ pub async fn start_region_selection(app: tauri::AppHandle) -> Result<(), String>
         .title("Select a region")
         .decorations(false)
         .transparent(true)
-        .always_on_top(false)
+        .always_on_top(true)
         // Keep a taskbar entry as a final native escape hatch even if the
         // selector frontend ever fails before wiring its keyboard handlers.
         .skip_taskbar(false)
@@ -61,32 +67,55 @@ pub async fn start_region_selection(app: tauri::AppHandle) -> Result<(), String>
         #[cfg(debug_assertions)]
         eprintln!("[region-selector] native window created");
 
-        use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP, SWP_SHOWWINDOW};
-        let hwnd = selector
-            .hwnd()
-            .map_err(|error| format!("Could not access the region selector window: {error}"))?;
-        let transitions_disabled = windows::core::BOOL(1);
-        unsafe {
-            windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
-                hwnd,
-                windows::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED,
-                (&transitions_disabled as *const windows::core::BOOL).cast(),
-                std::mem::size_of::<windows::core::BOOL>() as u32,
-            )
+        let selector_for_setup = selector.clone();
+        let (setup_sender, setup_receiver) = tokio::sync::oneshot::channel();
+        selector
+            .run_on_main_thread(move || {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SetWindowPos, HWND_TOPMOST, SWP_SHOWWINDOW,
+                };
+
+                let result = (|| {
+                    let hwnd = selector_for_setup.hwnd().map_err(|error| {
+                        format!("Could not access the region selector window: {error}")
+                    })?;
+                    let transitions_disabled = windows::core::BOOL(1);
+                    unsafe {
+                        windows::Win32::Graphics::Dwm::DwmSetWindowAttribute(
+                            hwnd,
+                            windows::Win32::Graphics::Dwm::DWMWA_TRANSITIONS_FORCEDISABLED,
+                            (&transitions_disabled as *const windows::core::BOOL).cast(),
+                            std::mem::size_of::<windows::core::BOOL>() as u32,
+                        )
+                    }
+                    .map_err(|error| {
+                        format!("Could not disable selector window animations: {error}")
+                    })?;
+                    windows_capture::constrain_selector_to_desktop(hwnd)?;
+                    unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            Some(HWND_TOPMOST),
+                            x,
+                            y,
+                            width as i32,
+                            height as i32,
+                            SWP_SHOWWINDOW,
+                        )
+                    }
+                    .map_err(|error| format!("Could not position the region selector: {error}"))?;
+                    Ok(())
+                })();
+                let _ = setup_sender.send(result);
+            })
+            .map_err(|error| format!("Could not prepare the region selector: {error}"))?;
+        if let Err(error) = setup_receiver
+            .await
+            .map_err(|_| "The region selector setup stopped unexpectedly".to_string())?
+        {
+            let _ = selector.destroy();
+            return Err(error);
         }
-        .map_err(|error| format!("Could not disable selector window animations: {error}"))?;
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                Some(HWND_TOP),
-                x,
-                y,
-                width as i32,
-                height as i32,
-                SWP_SHOWWINDOW,
-            )
-        }
-        .map_err(|error| format!("Could not position the region selector: {error}"))?;
         #[cfg(debug_assertions)]
         eprintln!("[region-selector] bounded selection window is ready");
         Ok(())
@@ -251,7 +280,7 @@ mod windows_capture {
     use super::{png_result, CaptureResult};
     use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice};
     use windows::Win32::{
-        Foundation::{HWND, RECT},
+        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::{
             Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
             Gdi::{
@@ -260,13 +289,105 @@ mod windows_capture {
                 DIB_RGB_COLORS, HGDIOBJ, ROP_CODE, SRCCOPY,
             },
         },
-        Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS},
-        UI::WindowsAndMessaging::{
-            GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect, IsIconic,
-            PW_RENDERFULLCONTENT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-            SM_YVIRTUALSCREEN,
+        UI::{
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            WindowsAndMessaging::{
+                GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect, IsIconic,
+                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
+                WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_MOVING, WM_NCDESTROY, WM_SIZING,
+            },
         },
     };
+
+    const SELECTOR_BOUNDS_SUBCLASS_ID: usize = 0x4353_4244;
+
+    #[derive(Clone, Copy)]
+    struct SelectorBounds {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+
+    fn clamp_moving_rect(rect: &mut RECT, bounds: SelectorBounds) {
+        let width = (rect.right - rect.left).clamp(1, bounds.right - bounds.left);
+        let height = (rect.bottom - rect.top).clamp(1, bounds.bottom - bounds.top);
+        rect.left = rect.left.clamp(bounds.left, bounds.right - width);
+        rect.top = rect.top.clamp(bounds.top, bounds.bottom - height);
+        rect.right = rect.left + width;
+        rect.bottom = rect.top + height;
+    }
+
+    fn clamp_sizing_rect(rect: &mut RECT, edge: u32, bounds: SelectorBounds) {
+        if matches!(edge, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT) {
+            rect.left = rect.left.max(bounds.left);
+        }
+        if matches!(edge, WMSZ_RIGHT | WMSZ_TOPRIGHT | WMSZ_BOTTOMRIGHT) {
+            rect.right = rect.right.min(bounds.right);
+        }
+        if matches!(edge, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
+            rect.top = rect.top.max(bounds.top);
+        }
+        if matches!(edge, WMSZ_BOTTOM | WMSZ_BOTTOMLEFT | WMSZ_BOTTOMRIGHT) {
+            rect.bottom = rect.bottom.min(bounds.bottom);
+        }
+    }
+
+    unsafe extern "system" fn selector_bounds_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        let bounds = unsafe { *(reference_data as *const SelectorBounds) };
+        match message {
+            WM_MOVING => {
+                let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
+                clamp_moving_rect(rect, bounds);
+                return LRESULT(1);
+            }
+            WM_SIZING => {
+                let rect = unsafe { &mut *(lparam.0 as *mut RECT) };
+                clamp_sizing_rect(rect, wparam.0 as u32, bounds);
+                return LRESULT(1);
+            }
+            WM_NCDESTROY => unsafe {
+                let _ = RemoveWindowSubclass(hwnd, Some(selector_bounds_subclass), subclass_id);
+                drop(Box::from_raw(reference_data as *mut SelectorBounds));
+            },
+            _ => {}
+        }
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    pub fn constrain_selector_to_desktop(hwnd: HWND) -> Result<(), String> {
+        let (left, top, width, height) = virtual_bounds()?;
+        let bounds = Box::new(SelectorBounds {
+            left,
+            top,
+            right: left + width as i32,
+            bottom: top + height as i32,
+        });
+        let reference_data = Box::into_raw(bounds) as usize;
+        let installed = unsafe {
+            SetWindowSubclass(
+                hwnd,
+                Some(selector_bounds_subclass),
+                SELECTOR_BOUNDS_SUBCLASS_ID,
+                reference_data,
+            )
+        };
+        if !installed.as_bool() {
+            unsafe {
+                drop(Box::from_raw(reference_data as *mut SelectorBounds));
+            }
+            return Err("Windows could not constrain the region selector to the desktop".into());
+        }
+        Ok(())
+    }
 
     struct DibCapture {
         screen_dc: windows::Win32::Graphics::Gdi::HDC,
@@ -329,13 +450,6 @@ mod windows_capture {
             unsafe { slice::from_raw_parts(self.bits.cast::<u8>(), byte_len).to_vec() }
         }
 
-        fn is_blank(&self) -> bool {
-            let byte_len = self.width as usize * self.height as usize * 4;
-            unsafe { slice::from_raw_parts(self.bits.cast::<u8>(), byte_len) }
-                .chunks_exact(4)
-                .all(|pixel| pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0)
-        }
-
         unsafe fn copy_screen(&self, x: i32, y: i32) -> Result<(), String> {
             let raster_operation = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
             unsafe {
@@ -392,16 +506,7 @@ mod windows_capture {
             let width = bounds.right - bounds.left;
             let height = bounds.bottom - bounds.top;
             let surface = DibCapture::new(width, height)?;
-
-            let print_succeeded = PrintWindow(
-                window,
-                surface.memory_dc,
-                PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT),
-            )
-            .as_bool();
-            if !print_succeeded || surface.is_blank() {
-                surface.copy_screen(bounds.left, bounds.top)?;
-            }
+            surface.copy_screen(bounds.left, bounds.top)?;
 
             png_result(
                 surface.pixels(),
@@ -426,10 +531,23 @@ mod windows_capture {
         }
     }
 
-    pub fn initial_selector_bounds() -> Result<(i32, i32, u32, u32), String> {
+    pub fn initial_selector_bounds(
+        preferred_width: Option<u32>,
+        preferred_height: Option<u32>,
+        preferred_x: Option<i32>,
+        preferred_y: Option<i32>,
+    ) -> Result<(i32, i32, u32, u32), String> {
         let (desktop_x, desktop_y, desktop_width, desktop_height) = virtual_bounds()?;
-        let width = desktop_width.min(900);
-        let height = desktop_height.min(520);
+        let minimum_width = desktop_width.min(240);
+        let minimum_height = desktop_height.min(160);
+        let width = preferred_width
+            .filter(|width| *width > 0)
+            .unwrap_or(900)
+            .clamp(minimum_width, desktop_width);
+        let height = preferred_height
+            .filter(|height| *height > 0)
+            .unwrap_or(520)
+            .clamp(minimum_height, desktop_height);
         let mut cursor = windows::Win32::Foundation::POINT::default();
         unsafe {
             GetCursorPos(&mut cursor)
@@ -437,8 +555,12 @@ mod windows_capture {
         }
         let maximum_x = desktop_x + desktop_width as i32 - width as i32;
         let maximum_y = desktop_y + desktop_height as i32 - height as i32;
-        let x = (cursor.x - width as i32 / 2).clamp(desktop_x, maximum_x);
-        let y = (cursor.y - height as i32 / 2).clamp(desktop_y, maximum_y);
+        let (requested_x, requested_y) = match (preferred_x, preferred_y) {
+            (Some(x), Some(y)) => (x, y),
+            _ => (cursor.x - width as i32 / 2, cursor.y - height as i32 / 2),
+        };
+        let x = requested_x.clamp(desktop_x, maximum_x);
+        let y = requested_y.clamp(desktop_y, maximum_y);
         Ok((x, y, width, height))
     }
 

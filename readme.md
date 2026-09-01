@@ -65,6 +65,139 @@ The frontend can also run by itself for layout development:
 npm run dev
 ```
 
+## Codex on Windows troubleshooting
+
+Read this section before changing Codex sandbox settings, repository ACLs, or
+Tauri/Vite ports. It records the working state established after the Windows
+sandbox incident on 2026-09-01.
+
+### Known-good development layout
+
+CapSage and DBSage deliberately use separate, fixed ports. `strictPort: true`
+is intentional: a port collision should fail clearly instead of silently
+connecting a Tauri window to the wrong frontend.
+
+| Application | Vite dev | HMR | Preview |
+| --- | ---: | ---: | ---: |
+| DBSage | 14210 | 14211 | 14212 |
+| CapSage | 14310 | 14311 | 14312 |
+
+For CapSage, `vite.config.ts` and `src-tauri/tauri.conf.json` must agree on port
+14310. Do not change only `build.devUrl`. Before starting `npm run tauri dev`,
+also confirm that an installed CapSage tray process is not already active:
+
+```powershell
+Get-Process -Name capsage -ErrorAction SilentlyContinue
+Get-NetTCPConnection -LocalPort 14310 -ErrorAction SilentlyContinue
+```
+
+Stop a conflicting installed or stale development process deliberately. Do not
+kill every Node, Cargo, or Tauri process on the machine; DBSage may be running at
+the same time on its own ports.
+
+### The two sandbox failures are different
+
+#### 1. Sandbox setup or ACL failure
+
+Typical signs include a sandbox setup/refresh error, `Access denied` while
+Codex applies a deny ACE, Git becoming unreadable, or repository metadata owned
+by a `CodexSandbox...` account instead of the normal Windows user.
+
+Inspect first; do not immediately restart or recursively rewrite permissions:
+
+```powershell
+Get-Acl . | Select-Object Owner
+Get-Acl .git | Select-Object Owner
+if (Test-Path .codex) { Get-Acl .codex | Select-Object Owner }
+
+$codexHome = if ($env:CODEX_HOME) {
+  $env:CODEX_HOME
+} else {
+  Join-Path $env:USERPROFILE ".codex"
+}
+$sandboxLog = Get-ChildItem "$codexHome\.sandbox\sandbox*.log" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+$sandboxLog | Select-Object FullName, LastWriteTime
+Get-Content -LiteralPath $sandboxLog.FullName -Tail 200
+```
+
+During the 2026-09-01 incident, the log identified two repository metadata
+paths affected by prior elevated-sandbox setup: `.git` and an empty `.codex`
+directory. `.git` ownership was restored to the normal Windows user, and the
+verified-empty stale `.codex` directory was removed. Do not copy those repairs
+blindly: use the log to identify the exact failing path, verify its contents,
+and never delete a non-empty `.codex` directory just because it exists.
+
+On managed Codex sessions, do not modify the user's global Git configuration to
+work around ownership checks. Use a process-local override when one is needed:
+
+```powershell
+git -c safe.directory=D:/Code/CapSage status
+```
+
+#### 2. Nested Node child-process `EPERM`
+
+This is the failure that affected Vite/esbuild. Normal shell commands, Git, and
+Rust could work while `npm run build` failed at esbuild's
+`ensureServiceIsRunning` with `Error: spawn EPERM`. Directly running Node or the
+esbuild executable does not disprove this failure: the denied operation is Node
+creating another process from inside the unelevated sandbox.
+
+Use this small probe to distinguish it from a broken Vite configuration:
+
+```powershell
+node -e "const {spawnSync}=require('node:child_process'); const r=spawnSync(process.execPath,['--version'],{encoding:'utf8'}); console.log(r.error?.code ?? r.status)"
+```
+
+If that prints `EPERM`, do not keep changing Vite, Tauri, ports, or
+`windowsHide`, and do not repeatedly restart Codex. Use a persistent,
+command-scoped Codex approval/rule for only the workflows that require nested
+process creation:
+
+```text
+npm run build
+npm run tauri dev
+npm run tauri build
+```
+
+When Codex requests permission, approve only the exact command prefix and use
+the option to remember that narrow rule. The confirmed working result for this
+incident was a successful frontend build under the `npm run build` exception,
+a successful `cargo check` in the normal sandbox, and a successful Tauri dev
+launch under the `npm run tauri dev` exception.
+
+Keep normal inspection, editing, Git, TypeScript-only checks, and Rust checks in
+the sandbox. Avoid full-access mode or a broad approval for all `node`, `npm`,
+PowerShell, or shell commands.
+
+### Codex sandbox configuration
+
+OpenAI documents `elevated` as the preferred native Windows sandbox and
+`unelevated` as the fallback when administrator-approved setup is blocked. This
+machine's working fallback during the incident was:
+
+```toml
+[windows]
+sandbox = "unelevated"
+```
+
+Both modes use a private desktop by default. Setting
+`sandbox_private_desktop = false` is a UI-compatibility option; it did **not**
+fix the Node/esbuild `spawn EPERM` failure and should not be treated as the
+solution for it.
+
+Changing the global Codex configuration is one of the few cases where a single
+Codex restart may be required. A deterministic `spawn EPERM` that returns after
+every restart is not. Stop restarting, run the Node probe, and use the narrow
+command exception described above.
+
+For unresolved setup failures, retain the sandbox log and record the Windows
+version, selected sandbox mode, exact error, failing command, and affected path.
+Never share the contents of `CODEX_HOME/.sandbox-secrets/`. See the official
+[OpenAI Windows sandbox documentation](https://learn.chatgpt.com/docs/windows/windows-sandbox)
+for the current mode definitions and diagnostic guidance.
+
 ## Verification
 
 ```powershell
@@ -103,6 +236,21 @@ version tag, and creates a GitHub release with a clean
 new current release only after the new release and updater endpoint are verified;
 superseded releases and their tags are deleted because CapSage never rolls back
 through the updater.
+
+### Installer handling of a running CapSage instance
+
+CapSage remains active in the notification area when its main window is closed.
+During manual install, repair, upgrade, or uninstall, setup automatically stops
+that per-user process before replacing or removing files. It does not display
+Tauri's additional "Click OK to kill it" confirmation; failure to terminate the
+process is still reported and aborts the operation safely. In-app updates use
+CapSage's graceful exit path before launching setup.
+
+Older installers may leave the running-app prompt behind another setup window,
+making uninstall appear stuck. That condition is not a Codex sandbox request,
+repository ACL problem, or Tauri dev-server collision. Future changes to
+`src-tauri/installer.nsi` must preserve the automatic process stop;
+`publish.ps1` enforces it.
 
 ## Project layout
 

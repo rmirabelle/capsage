@@ -1,4 +1,5 @@
 mod capture;
+mod document;
 mod updater;
 
 use std::sync::Mutex;
@@ -335,6 +336,8 @@ pub fn run() {
             capture::cancel_region_selection,
             capture::capture_selector_region,
             capture::save_image,
+            document::open_capture_file,
+            document::save_capsage_document,
             activate_tray_menu,
             close_tray_menu,
             show_capsage,

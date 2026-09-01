@@ -70,6 +70,36 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 
+; CapSage is a tray application, so closing its window does not stop the process.
+; Manual install, repair, upgrade, and uninstall should match Tauri's updater and
+; passive-installer behavior by stopping the per-user process automatically.
+!macro StopCapSageIfRunning executableName productName
+  !if "${INSTALLMODE}" == "currentUser"
+    nsis_tauri_utils::FindProcessCurrentUser "${executableName}"
+  !else
+    nsis_tauri_utils::FindProcess "${executableName}"
+  !endif
+  Pop $R0
+
+  ${If} $R0 = 0
+    DetailPrint "Stopping ${productName}..."
+    !if "${INSTALLMODE}" == "currentUser"
+      nsis_tauri_utils::KillProcessCurrentUser "${executableName}"
+    !else
+      nsis_tauri_utils::KillProcess "${executableName}"
+    !endif
+    Pop $R0
+    Sleep 500
+
+    ${If} $R0 != 0
+    ${AndIf} $R0 != 2
+      nsis_tauri_utils::StrReplace "$(failedToKillApp)" "{{product_name}}" "${productName}"
+      Pop $R1
+      Abort $R1
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
@@ -339,6 +369,8 @@ Function PageLeaveReinstall
   ${EndIf}
 
   reinst_uninstall:
+    !insertmacro StopCapSageIfRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+
     HideWindow
     ClearErrors
 
@@ -636,7 +668,7 @@ Section Install
     !insertmacro NSIS_HOOK_PREINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro StopCapSageIfRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
@@ -779,7 +811,7 @@ Section Uninstall
     !insertmacro NSIS_HOOK_PREUNINSTALL
   !endif
 
-  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  !insertmacro StopCapSageIfRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
   ; Delete the app directory and its content from disk
   ; Copy main executable
@@ -979,4 +1011,3 @@ Function CreateOrUpdateDesktopShortcut
   CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\${MAINBINARYNAME}.exe" "" "C:\Users\Public\${PRODUCTNAME}\icon.ico" 0
   !insertmacro SetLnkAppUserModelId "$DESKTOP\${PRODUCTNAME}.lnk"
 FunctionEnd
-

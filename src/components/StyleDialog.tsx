@@ -1,5 +1,6 @@
-import { ArrowRight, FloppyDisk, Lightning, Palette, SlidersHorizontal, Trash } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { FloppyDisk, Lightning, Palette, SlidersHorizontal, Trash } from "@phosphor-icons/react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { drawCallout, measureCalloutForText } from "../editor/draw";
 import type { CaptureStyle } from "../editor/style";
 
 interface Props {
@@ -27,67 +28,288 @@ const FONT_FAMILIES = [
   "Courier New"
 ];
 
+type RgbColor = { r: number; g: number; b: number };
+type HsvColor = { h: number; s: number; v: number };
+type ColorStyleKey = "backgroundColor" | "borderColor" | "textColor";
+
+const COLOR_LABELS: Record<ColorStyleKey, string> = {
+  backgroundColor: "Background & arrow",
+  borderColor: "Border & focus",
+  textColor: "Text"
+};
+
+const clamp = (value: number, minimum: number, maximum: number) =>
+  Math.min(maximum, Math.max(minimum, value));
+
+const normalizedHex = (input: string) => {
+  const digits = input.trim().replace(/^#/, "");
+  if (/^[0-9a-f]{6}$/i.test(digits)) return `#${digits.toLowerCase()}`;
+  if (/^[0-9a-f]{3}$/i.test(digits)) {
+    return `#${digits.split("").map((digit) => digit + digit).join("").toLowerCase()}`;
+  }
+  return null;
+};
+
+const hexToRgb = (hex: string): RgbColor => {
+  const normalized = normalizedHex(hex) ?? "#000000";
+  return {
+    r: Number.parseInt(normalized.slice(1, 3), 16),
+    g: Number.parseInt(normalized.slice(3, 5), 16),
+    b: Number.parseInt(normalized.slice(5, 7), 16)
+  };
+};
+
+const rgbToHex = ({ r, g, b }: RgbColor) => `#${[r, g, b]
+  .map((channel) => clamp(Math.round(channel), 0, 255).toString(16).padStart(2, "0"))
+  .join("")}`;
+
+const rgbToHsv = ({ r, g, b }: RgbColor): HsvColor => {
+  const red = r / 255;
+  const green = g / 255;
+  const blue = b / 255;
+  const maximum = Math.max(red, green, blue);
+  const minimum = Math.min(red, green, blue);
+  const delta = maximum - minimum;
+  let hue = 0;
+  if (delta > 0) {
+    if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+  }
+  return {
+    h: (hue + 360) % 360,
+    s: maximum === 0 ? 0 : delta / maximum,
+    v: maximum
+  };
+};
+
+const hsvToRgb = ({ h, s, v }: HsvColor): RgbColor => {
+  const chroma = v * s;
+  const segment = ((h % 360) + 360) % 360 / 60;
+  const secondary = chroma * (1 - Math.abs(segment % 2 - 1));
+  const offset = v - chroma;
+  const [red, green, blue] = segment < 1 ? [chroma, secondary, 0]
+    : segment < 2 ? [secondary, chroma, 0]
+      : segment < 3 ? [0, chroma, secondary]
+        : segment < 4 ? [0, secondary, chroma]
+          : segment < 5 ? [secondary, 0, chroma]
+            : [chroma, 0, secondary];
+  return {
+    r: Math.round((red + offset) * 255),
+    g: Math.round((green + offset) * 255),
+    b: Math.round((blue + offset) * 255)
+  };
+};
+
 function ColorControl({
   label,
   value,
-  onChange
+  active,
+  onOpen
+}: {
+  label: string;
+  value: string;
+  active: boolean;
+  onOpen: () => void;
+}) {
+  return (
+    <div className="style-color-control">
+      <span>{label}</span>
+      <button
+        type="button"
+        className={`style-color-swatch-button ${active ? "active" : ""}`}
+        style={{ backgroundColor: value }}
+        aria-label={`Edit ${label.toLowerCase()} color`}
+        aria-pressed={active}
+        aria-controls="themed-color-picker"
+        onClick={onOpen}
+      />
+    </div>
+  );
+}
+
+function ThemedColorPicker({
+  label,
+  value,
+  onChange,
+  disabled
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  disabled: boolean;
 }) {
-  const [hex, setHex] = useState(value.toUpperCase());
+  const rgb = hexToRgb(value);
+  const hsv = rgbToHsv(rgb);
+  const [rgbDraft, setRgbDraft] = useState({ r: String(rgb.r), g: String(rgb.g), b: String(rgb.b) });
+  const [hexDraft, setHexDraft] = useState(value.toUpperCase());
 
-  useEffect(() => setHex(value.toUpperCase()), [value]);
+  useEffect(() => {
+    const next = hexToRgb(value);
+    setRgbDraft({ r: String(next.r), g: String(next.g), b: String(next.b) });
+    setHexDraft(value.toUpperCase());
+  }, [value]);
 
-  const normalizedHex = (input: string) => {
-    const digits = input.trim().replace(/^#/, "");
-    if (/^[0-9a-f]{6}$/i.test(digits)) return `#${digits.toLowerCase()}`;
-    if (/^[0-9a-f]{3}$/i.test(digits)) {
-      return `#${digits.split("").map((digit) => digit + digit).join("").toLowerCase()}`;
-    }
-    return null;
+  const updateFromWheel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const radius = Math.min(bounds.width, bounds.height) / 2;
+    const x = event.clientX - bounds.left - bounds.width / 2;
+    const y = event.clientY - bounds.top - bounds.height / 2;
+    const saturation = clamp(Math.hypot(x, y) / radius, 0, 1);
+    const hue = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    onChange(rgbToHex(hsvToRgb({ h: hue, s: saturation, v: hsv.v })));
   };
 
+  const changeRgb = (channel: keyof RgbColor, next: string) => {
+    setRgbDraft((current) => ({ ...current, [channel]: next }));
+    if (!/^\d{1,3}$/.test(next)) return;
+    const numeric = Number(next);
+    if (numeric > 255) return;
+    onChange(rgbToHex({ ...rgb, [channel]: numeric }));
+  };
+
+  const resetRgbDraft = () => {
+    const current = hexToRgb(value);
+    setRgbDraft({ r: String(current.r), g: String(current.g), b: String(current.b) });
+  };
+
+  const wheelAngle = hsv.h * Math.PI / 180;
+  const fullValueColor = rgbToHex(hsvToRgb({ ...hsv, v: 1 }));
+
   return (
-    <label className="style-color-control">
-      <span>{label}</span>
-      <span className="style-color-value">
-        <span className="style-color-picker-shell">
-          <i className="style-color-picker-swatch" style={{ backgroundColor: value }} />
-          <input
-            className="style-color-picker"
-            type="color"
-            value={value}
-            aria-label={`${label} color picker`}
-            onChange={(event) => onChange(event.target.value)}
-          />
-        </span>
-        <input
-          className="style-hex-input"
-          type="text"
-          value={hex}
-          maxLength={7}
-          spellCheck={false}
-          aria-label={`${label} hex color`}
-          onChange={(event) => {
-            const next = event.target.value.toUpperCase();
-            setHex(next);
-            const digits = next.trim().replace(/^#/, "");
-            if (/^[0-9A-F]{6}$/.test(digits)) onChange(`#${digits.toLowerCase()}`);
-          }}
-          onBlur={() => {
-            const normalized = normalizedHex(hex);
-            if (normalized) onChange(normalized);
-            else setHex(value.toUpperCase());
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") event.currentTarget.blur();
+    <section
+      id="themed-color-picker"
+      className={`themed-color-picker ${disabled ? "disabled" : ""}`}
+      aria-label={`${label} color picker`}
+      aria-disabled={disabled}
+    >
+      <div
+        className="themed-color-wheel"
+        role="slider"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-label={`${label} hue and saturation`}
+        aria-valuetext={`Hue ${Math.round(hsv.h)} degrees, saturation ${Math.round(hsv.s * 100)} percent`}
+        onPointerDown={(event) => {
+          if (disabled) return;
+          event.currentTarget.setPointerCapture(event.pointerId);
+          updateFromWheel(event);
+        }}
+        onPointerMove={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) updateFromWheel(event);
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (disabled) return;
+          const next = { ...hsv };
+          if (event.key === "ArrowLeft") next.h = (next.h + 358) % 360;
+          else if (event.key === "ArrowRight") next.h = (next.h + 2) % 360;
+          else if (event.key === "ArrowUp") next.s = clamp(next.s + 0.02, 0, 1);
+          else if (event.key === "ArrowDown") next.s = clamp(next.s - 0.02, 0, 1);
+          else return;
+          event.preventDefault();
+          onChange(rgbToHex(hsvToRgb(next)));
+        }}
+      >
+        <i className="themed-color-wheel-shade" style={{ opacity: 1 - hsv.v }} />
+        <i
+          className="themed-color-wheel-thumb"
+          style={{
+            left: `${50 + Math.cos(wheelAngle) * hsv.s * 50}%`,
+            top: `${50 + Math.sin(wheelAngle) * hsv.s * 50}%`,
+            backgroundColor: value
           }}
         />
-      </span>
-    </label>
+      </div>
+      <div className="themed-color-picker-values">
+        <label className="themed-color-brightness">
+          <span>Brightness <strong>{Math.round(hsv.v * 100)}%</strong></span>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={Math.round(hsv.v * 100)}
+            disabled={disabled}
+            style={{ background: `linear-gradient(90deg, #000000, ${fullValueColor})` }}
+            onChange={(event) => onChange(rgbToHex(hsvToRgb({ ...hsv, v: Number(event.target.value) / 100 })))}
+          />
+        </label>
+        <div className="themed-color-rgb-fields">
+          {(["r", "g", "b"] as const).map((channel) => (
+            <label key={channel}>
+              <span>{channel.toUpperCase()}</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={3}
+                value={rgbDraft[channel]}
+                disabled={disabled}
+                onChange={(event) => changeRgb(channel, event.target.value)}
+                onBlur={resetRgbDraft}
+              />
+            </label>
+          ))}
+        </div>
+        <label className="themed-color-hex-field">
+          <span>Hex</span>
+          <input
+            type="text"
+            aria-label="Hex color"
+            maxLength={7}
+            spellCheck={false}
+            value={hexDraft}
+            disabled={disabled}
+            onChange={(event) => {
+              const next = event.target.value.toUpperCase();
+              setHexDraft(next);
+              const digits = next.trim().replace(/^#/, "");
+              if (/^[0-9A-F]{6}$/.test(digits)) onChange(`#${digits.toLowerCase()}`);
+            }}
+            onBlur={() => {
+              const normalized = normalizedHex(hexDraft);
+              if (normalized) onChange(normalized);
+              else setHexDraft(value.toUpperCase());
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+          />
+        </label>
+      </div>
+    </section>
   );
+}
+
+function CalloutPreview({ style }: { style: CaptureStyle }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return;
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    const text = "Sage style";
+    const bounds = measureCalloutForText(context, text, canvas.width - 50, style);
+    const x = 22;
+    const y = 65;
+    drawCallout(context, {
+      id: "style-preview-callout",
+      x,
+      y,
+      width: bounds.width,
+      height: bounds.height,
+      text,
+      targetX: Math.min(canvas.width - 28, x + bounds.width + 55 * style.calloutScale),
+      targetY: Math.min(canvas.height - 36, y + bounds.height + 105 * style.calloutScale)
+    }, style);
+  }, [style]);
+
+  return <canvas ref={canvasRef} className="style-preview-callout-canvas" width={440} height={520} />;
 }
 
 export function StyleDialog({
@@ -103,9 +325,12 @@ export function StyleDialog({
   onDelete
 }: Props) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [openColor, setOpenColor] = useState<ColorStyleKey | null>(null);
   const initialStyleRef = useRef({ ...style });
   const hasChanges = JSON.stringify(style) !== JSON.stringify(initialStyleRef.current);
   const update = <Key extends keyof CaptureStyle>(key: Key, value: CaptureStyle[Key]) =>
+    onChange({ ...style, [key]: value });
+  const updateColor = (key: ColorStyleKey, value: string) =>
     onChange({ ...style, [key]: value });
 
   return (
@@ -120,7 +345,7 @@ export function StyleDialog({
         <header className="style-dialog-header">
           <div className="style-dialog-icon"><Palette size={23} weight="duotone" /></div>
           <div>
-            <h2 id="style-dialog-title">Edit Capture Style</h2>
+            <h2 id="style-dialog-title">Edit Style</h2>
             <p>Editing <strong>{style.name}</strong> · Preview changes here, then apply or save them.</p>
           </div>
         </header>
@@ -131,17 +356,28 @@ export function StyleDialog({
               <ColorControl
                 label="Background & arrow"
                 value={style.backgroundColor}
-                onChange={(value) => update("backgroundColor", value)}
+                active={openColor === "backgroundColor"}
+                onOpen={() => setOpenColor("backgroundColor")}
               />
               <ColorControl
                 label="Border & focus"
                 value={style.borderColor}
-                onChange={(value) => update("borderColor", value)}
+                active={openColor === "borderColor"}
+                onOpen={() => setOpenColor("borderColor")}
               />
               <ColorControl
                 label="Text"
                 value={style.textColor}
-                onChange={(value) => update("textColor", value)}
+                active={openColor === "textColor"}
+                onOpen={() => setOpenColor("textColor")}
+              />
+              <ThemedColorPicker
+                label={openColor ? COLOR_LABELS[openColor] : "Style"}
+                value={openColor ? style[openColor] : "#808080"}
+                disabled={!openColor}
+                onChange={(value) => {
+                  if (openColor) updateColor(openColor, value);
+                }}
               />
             </div>
 
@@ -211,32 +447,7 @@ export function StyleDialog({
               className="style-preview-focus"
               style={{ borderColor: style.borderColor, borderWidth: style.borderThickness }}
             />
-            <div
-              className="style-preview-callout"
-              style={{
-                color: style.textColor,
-                backgroundColor: style.backgroundColor,
-                borderColor: style.borderColor,
-                borderWidth: style.borderThickness * style.calloutScale,
-                borderRadius: 18 * style.calloutScale,
-                padding: `${17 * style.calloutScale}px ${22 * style.calloutScale}px`,
-                fontFamily: style.fontFamily,
-                fontSize: Math.min(34, Math.max(10, style.fontSize * style.calloutScale * 0.72))
-              }}
-            >
-              Sage style
-            </div>
-            <div
-              className="style-preview-arrow"
-              style={{
-                color: style.borderColor,
-                backgroundColor: style.backgroundColor,
-                transform: `scale(${style.calloutScale})`,
-                transformOrigin: "left center"
-              }}
-            >
-              <ArrowRight size={28} weight="fill" />
-            </div>
+            <CalloutPreview style={style} />
           </aside>
         </div>
 

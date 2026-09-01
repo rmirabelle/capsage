@@ -22,6 +22,12 @@ XSage desktop applications:
 - First installation does not offer an uninstall choice. A same-version manual
   rerun offers repair/reinstall or uninstall; a newer manual installer offers the
   upgrade flow. Windows Settings also contains the normal uninstall entry.
+- CapSage is a tray application: closing its main window does not stop
+  `capsage.exe`. Manual install, repair, upgrade, and uninstall automatically
+  stop the per-user process before changing files. Do not restore Tauri's stock
+  interactive kill-confirmation macro; its nested prompt can appear behind setup
+  and make a waiting uninstall look failed. In-app updates already exit CapSage
+  gracefully before launching setup.
 
 `publish.ps1` validates these rules before it creates a tag and validates the
 generated executable and NSIS script again after the release build.
@@ -51,7 +57,10 @@ generated executable and NSIS script again after the release build.
    - CapSage starts tray-only;
    - the tray icon restores and exits the app correctly;
    - Start Menu and optional desktop shortcuts show the CapSage icon;
-   - the install, repair/upgrade, and uninstall paths behave as expected.
+   - with CapSage running in the tray, repair/upgrade closes it automatically
+     without an additional confirmation and completes the uninstall stage;
+   - the fresh install, same-version repair, upgrade, and uninstall paths all
+     behave as expected.
 
 5. Commit and push the reviewed source changes. Publishing requires a clean work
    tree and the public `rmirabelle/capsage` origin.

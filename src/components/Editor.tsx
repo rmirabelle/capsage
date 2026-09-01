@@ -4,12 +4,12 @@ import {
   ChatCenteredText,
   Check,
   Crop,
+  DownloadSimple,
   FloppyDisk,
   FrameCorners,
   Minus,
   Plus,
   Trash,
-  Warning,
   XCircle
 } from "@phosphor-icons/react";
 import {
@@ -21,6 +21,7 @@ import {
 } from "react";
 import { distance, pointInCallout, pointInFocus } from "../editor/geometry";
 import { drawScene, measureCalloutForText, measureCalloutHeightForWidth } from "../editor/draw";
+import type { EditorDocumentState } from "../editor/document";
 import {
   MIN_FOCUS_SIZE,
   calloutFontSize,
@@ -52,9 +53,12 @@ type DragState =
 interface Props {
   capture: CaptureResult;
   captureStyle: CaptureStyle;
+  initialDocumentState: EditorDocumentState;
   onCrop: (capture: CaptureResult) => void;
-  onSave: (dataUrl: string, format: "png" | "jpeg") => Promise<boolean>;
-  onClear: () => void;
+  onDocumentChange: (state: EditorDocumentState) => void;
+  onSaveDocument: (state: EditorDocumentState, saveAs: boolean) => Promise<void>;
+  documentSaving: boolean;
+  onExport: (dataUrl: string, format: "png" | "jpeg") => Promise<boolean>;
 }
 
 const cloneCallouts = (callouts: Callout[]) => callouts.map((callout) => ({ ...callout }));
@@ -68,7 +72,16 @@ const cloneSnapshot = (snapshot: EditorSnapshot): EditorSnapshot => ({
   focuses: cloneFocuses(snapshot.focuses)
 });
 
-export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props) {
+export function Editor({
+  capture,
+  captureStyle,
+  initialDocumentState,
+  onCrop,
+  onDocumentChange,
+  onSaveDocument,
+  documentSaving,
+  onExport
+}: Props) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -77,6 +90,7 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
   const dragRef = useRef<DragState | null>(null);
   const cropDragRef = useRef<CropDragState | null>(null);
   const pendingCropRef = useRef<PendingCrop | null>(null);
+  const initialDocumentStateRef = useRef(initialDocumentState);
   const panRef = useRef<PanState | null>(null);
   const textBeforeRef = useRef<EditorSnapshot | null>(null);
   const [ready, setReady] = useState(false);
@@ -93,9 +107,8 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
   const [format, setFormat] = useState<SaveFormat>(() => localStorage.getItem(SAVE_FORMAT_KEY) === "jpeg" ? "jpeg" : "png");
   const [maxWidthInput, setMaxWidthInput] = useState(() => localStorage.getItem(SAVE_MAX_WIDTH_KEY) ?? "");
   const [maxHeightInput, setMaxHeightInput] = useState(() => localStorage.getItem(SAVE_MAX_HEIGHT_KEY) ?? "");
-  const [saving, setSaving] = useState(false);
-  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
-  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [cropRect, setCropRect] = useState<FocusRegion | null>(null);
 
   const fitScale = Math.min(
@@ -147,8 +160,9 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
     const image = new Image();
     image.onload = () => {
       imageRef.current = image;
-      setCallouts(pendingCrop ? cloneCallouts(pendingCrop.callouts) : []);
-      setFocuses(pendingCrop ? cloneFocuses(pendingCrop.focuses) : []);
+      const initialState = pendingCrop ?? initialDocumentStateRef.current;
+      setCallouts(cloneCallouts(initialState.callouts));
+      setFocuses(cloneFocuses(initialState.focuses));
       setReady(true);
     };
     image.src = capture.dataUrl;
@@ -159,6 +173,14 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
     setCropRect(null);
     setZoom(null);
   }, [capture.dataUrl, setCallouts, setFocuses]);
+
+  useEffect(() => {
+    if (!ready) return;
+    onDocumentChange({
+      callouts: cloneCallouts(callouts),
+      focuses: cloneFocuses(focuses)
+    });
+  }, [callouts, focuses, onDocumentChange, ready]);
 
   useEffect(() => {
     const element = workspaceRef.current;
@@ -293,10 +315,6 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
         }
         return;
       }
-      if (confirmingClear) {
-        if (event.key === "Escape") setConfirmingClear(false);
-        return;
-      }
       const target = event.target as HTMLElement;
       const typing = target.tagName === "TEXTAREA" || target.tagName === "INPUT";
       if (event.key === "Escape") {
@@ -315,7 +333,7 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [confirmingClear, cropRect, redo, removeSelected, undo]);
+  }, [cropRect, redo, removeSelected, undo]);
 
   const pointFromEvent = (event: {
     currentTarget: HTMLCanvasElement;
@@ -715,7 +733,7 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
     dragRef.current = null;
   };
 
-  const save = async (settings: SaveSettings) => {
+  const exportImage = async (settings: SaveSettings) => {
     const image = imageRef.current;
     if (!image) return;
     const maxWidth = Math.max(0, Math.floor(Number(settings.maxWidth) || 0));
@@ -736,8 +754,8 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
     else localStorage.removeItem(SAVE_MAX_WIDTH_KEY);
     if (settings.maxHeight) localStorage.setItem(SAVE_MAX_HEIGHT_KEY, settings.maxHeight);
     else localStorage.removeItem(SAVE_MAX_HEIGHT_KEY);
-    setSaveDialogOpen(false);
-    setSaving(true);
+    setExportDialogOpen(false);
+    setExporting(true);
     try {
       const sourceCanvas = document.createElement("canvas");
       sourceCanvas.width = capture.width;
@@ -758,9 +776,9 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
         outputContext.drawImage(sourceCanvas, 0, 0, exportWidth, exportHeight);
       }
       const dataUrl = outputCanvas.toDataURL(settings.format === "png" ? "image/png" : "image/jpeg", 0.92);
-      await onSave(dataUrl, settings.format);
+      await onExport(dataUrl, settings.format);
     } finally {
-      setSaving(false);
+      setExporting(false);
     }
   };
 
@@ -795,12 +813,17 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
           </>
         )}
         <div className="editor-toolbar-spacer" />
-        <button className="clear-capture-button" onClick={() => setConfirmingClear(true)} title="Discard this capture">
-          <XCircle size={17} /> <span>Clear capture</span>
-        </button>
         <span className="image-size">{capture.width} × {capture.height}</span>
-        <button className="save-button" disabled={saving} onClick={() => setSaveDialogOpen(true)}>
-          <FloppyDisk size={17} weight="bold" /> {saving ? "Saving…" : "Save"}
+        <div className="tool-group document-actions">
+          <button className="document-save-button" disabled={documentSaving} onClick={() => void onSaveDocument(currentSnapshot(), false)} title="Save editable CapSage document">
+            <FloppyDisk size={17} weight="bold" /> {documentSaving ? "Saving…" : "Save"}
+          </button>
+          <button className="document-save-as-button" disabled={documentSaving} onClick={() => void onSaveDocument(currentSnapshot(), true)} title="Save editable document as…">
+            Save as…
+          </button>
+        </div>
+        <button className="save-button" disabled={exporting} onClick={() => setExportDialogOpen(true)}>
+          <DownloadSimple size={17} weight="bold" /> {exporting ? "Exporting…" : "Export"}
         </button>
       </div>
       <div className="editor-workspace-frame">
@@ -903,42 +926,13 @@ export function Editor({ capture, captureStyle, onCrop, onSave, onClear }: Props
           <button onClick={zoomOut} title="Zoom out" aria-label="Zoom out"><Minus size={16} /></button>
         </div>
       </div>
-      {confirmingClear && (
-        <div className="confirm-overlay" role="presentation" onPointerDown={() => setConfirmingClear(false)}>
-          <div
-            className="confirm-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="clear-capture-title"
-            onPointerDown={(event) => event.stopPropagation()}
-          >
-            <div className="confirm-icon"><Warning size={22} weight="fill" /></div>
-            <div className="confirm-copy">
-              <h2 id="clear-capture-title">Clear this capture?</h2>
-              <p>The screenshot and any unsaved annotations will be discarded.</p>
-            </div>
-            <div className="confirm-actions">
-              <button autoFocus className="button secondary" onClick={() => setConfirmingClear(false)}>Cancel</button>
-              <button
-                className="button danger"
-                onClick={() => {
-                  setConfirmingClear(false);
-                  onClear();
-                }}
-              >
-                Clear capture
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      {saveDialogOpen && (
+      {exportDialogOpen && (
         <SaveDialog
           settings={{ format, maxWidth: maxWidthInput, maxHeight: maxHeightInput }}
           sourceWidth={capture.width}
           sourceHeight={capture.height}
-          onCancel={() => setSaveDialogOpen(false)}
-          onSave={(settings) => void save(settings)}
+          onCancel={() => setExportDialogOpen(false)}
+          onSave={(settings) => void exportImage(settings)}
         />
       )}
     </section>

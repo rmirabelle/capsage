@@ -310,7 +310,7 @@ export function measureCalloutHeightForWidth(
   return lineCount * captureStyleLineHeight(style) + paddingY * 2;
 }
 
-function drawCallout(ctx: CanvasRenderingContext2D, callout: Callout, style: CaptureStyle) {
+export function drawCallout(ctx: CanvasRenderingContext2D, callout: Callout, style: CaptureStyle) {
   const scale = style.calloutScale;
   const paddingX = calloutPaddingX(style);
   const paddingY = calloutPaddingY(style);

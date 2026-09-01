@@ -16,6 +16,7 @@
     "core:window:allow-close",
     "core:window:allow-is-focused",
     "core:window:allow-is-maximized",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "dialog:allow-open"
   ]
 }

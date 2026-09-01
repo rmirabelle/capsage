@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   Camera,
   CheckCircle,
@@ -11,14 +11,21 @@ import {
   Keyboard,
   PencilSimple,
   SpinnerGap,
-  WarningCircle
+  WarningCircle,
+  X
 } from "@phosphor-icons/react";
 import { Editor } from "./components/Editor";
 import { AboutDialog } from "./components/AboutDialog";
 import { CaptureStyleToolbar } from "./components/CaptureStyleToolbar";
 import { formatShortcut, ShortcutDialog, shortcutTokens } from "./components/ShortcutDialog";
 import { TitleBar } from "./components/TitleBar";
-import { DEFAULT_CAPTURE_STYLE, type CaptureStyle } from "./editor/style";
+import {
+  createManifest,
+  emptyDocumentState,
+  parseManifest,
+  type EditorDocumentState
+} from "./editor/document";
+import { loadActiveCaptureStyle, type CaptureStyle } from "./editor/style";
 import type { CaptureMode, CaptureResult } from "./editor/types";
 import { checkForUpdate, getAppVersion, type UpdateInfo } from "./lib/updater";
 
@@ -26,10 +33,118 @@ const DEFAULT_SHORTCUT = "Ctrl+Alt+PrintScreen";
 const MODE_KEY = "capsage.capture-mode";
 const SHORTCUT_KEY = "capsage.capture-shortcut";
 const SAVE_SEQUENCE_KEY = "capsage.save-sequence";
+const REGION_WIDTH_KEY = "capsage.region-width";
+const REGION_HEIGHT_KEY = "capsage.region-height";
+const REGION_X_KEY = "capsage.region-x";
+const REGION_Y_KEY = "capsage.region-y";
 
-type Stage = "empty" | "edit";
 type Notice = { tone: "success" | "error"; message: string } | null;
 type ShortcutStatus = { registered: boolean; shortcut: string; error: string | null };
+type DocumentBaseline = { dataUrl: string; metadata: string };
+type OpenedCaptureFile = CaptureResult & {
+  kind: "document" | "image";
+  manifestJson: string | null;
+};
+
+type CaptureDocument = {
+  id: string;
+  captureSession: number;
+  capture: CaptureResult;
+  state: EditorDocumentState;
+  path: string | null;
+  name: string;
+  createdAt: string;
+  baseline: DocumentBaseline | null;
+  saving: boolean;
+  style: CaptureStyle;
+};
+
+const documentMetadata = (
+  capture: CaptureResult,
+  state: EditorDocumentState,
+  style: CaptureStyle
+) => JSON.stringify({
+  width: capture.width,
+  height: capture.height,
+  originX: capture.originX,
+  originY: capture.originY,
+  state,
+  style
+});
+
+const documentBaseline = (
+  capture: CaptureResult,
+  state: EditorDocumentState,
+  style: CaptureStyle
+): DocumentBaseline => ({ dataUrl: capture.dataUrl, metadata: documentMetadata(capture, state, style) });
+
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+const capsageNameFor = (path: string) => `${fileName(path).replace(/\.[^.]+$/, "") || "Untitled"}.capsage`;
+
+const isDocumentDirty = (document: CaptureDocument) => {
+  const metadata = documentMetadata(document.capture, document.state, document.style);
+  return !document.baseline
+    || document.baseline.dataUrl !== document.capture.dataUrl
+    || document.baseline.metadata !== metadata;
+};
+
+type CaptureDocumentPanelProps = {
+  document: CaptureDocument;
+  active: boolean;
+  onUpdate: (id: string, patch: Partial<CaptureDocument>) => void;
+  onSave: (id: string, state: EditorDocumentState, saveAs: boolean) => Promise<void>;
+  onExport: (id: string, dataUrl: string, format: "png" | "jpeg") => Promise<boolean>;
+};
+
+const CaptureDocumentPanel = memo(function CaptureDocumentPanel({
+  document,
+  active,
+  onUpdate,
+  onSave,
+  onExport
+}: CaptureDocumentPanelProps) {
+  const documentId = document.id;
+  const updateCapture = useCallback((capture: CaptureResult) => {
+    onUpdate(documentId, { capture });
+  }, [documentId, onUpdate]);
+  const updateState = useCallback((state: EditorDocumentState) => {
+    onUpdate(documentId, { state });
+  }, [documentId, onUpdate]);
+  const updateStyle = useCallback((style: CaptureStyle) => {
+    onUpdate(documentId, { style });
+  }, [documentId, onUpdate]);
+  const saveDocument = useCallback((state: EditorDocumentState, saveAs: boolean) =>
+    onSave(documentId, state, saveAs), [documentId, onSave]);
+  const exportImage = useCallback((dataUrl: string, format: "png" | "jpeg") =>
+    onExport(documentId, dataUrl, format), [documentId, onExport]);
+
+  return (
+    <section
+      id={`capture-panel-${documentId}`}
+      className={`capture-document ${active ? "active" : ""}`}
+      role="tabpanel"
+      aria-labelledby={`capture-tab-${documentId}`}
+      aria-hidden={!active}
+    >
+      <CaptureStyleToolbar
+        hasCapture
+        captureSession={document.captureSession}
+        initialStyle={document.style}
+        onStyleChange={updateStyle}
+      />
+      <Editor
+        capture={document.capture}
+        captureStyle={document.style}
+        initialDocumentState={document.state}
+        onCrop={updateCapture}
+        onDocumentChange={updateState}
+        onSaveDocument={saveDocument}
+        documentSaving={document.saving}
+        onExport={exportImage}
+      />
+    </section>
+  );
+});
 
 export default function App() {
   const initialMode = localStorage.getItem(MODE_KEY) === "region" ? "region" : "window";
@@ -38,10 +153,11 @@ export default function App() {
   const modeRef = useRef(mode);
   const capturingRef = useRef(false);
   const shortcutDialogOpenRef = useRef(false);
-  const [stage, setStage] = useState<Stage>("empty");
-  const [capture, setCapture] = useState<CaptureResult | null>(null);
-  const [captureSession, setCaptureSession] = useState(0);
-  const [captureStyle, setCaptureStyle] = useState<CaptureStyle>({ ...DEFAULT_CAPTURE_STYLE });
+  const [documents, setDocuments] = useState<CaptureDocument[]>([]);
+  const documentsRef = useRef(documents);
+  documentsRef.current = documents;
+  const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
+  const captureSessionRef = useRef(0);
   const [capturing, setCapturing] = useState(false);
   const [shortcutReady, setShortcutReady] = useState(false);
   const [shortcut, setShortcut] = useState(initialShortcut);
@@ -50,8 +166,14 @@ export default function App() {
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [pendingCloseDocumentId, setPendingCloseDocumentId] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState("");
   const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null);
+  const activeDocument = documents.find((document) => document.id === activeDocumentId) ?? null;
+  const activeDocumentDirty = activeDocument ? isDocumentDirty(activeDocument) : false;
+  const pendingCloseDocument = documents.find(
+    (document) => document.id === pendingCloseDocumentId
+  ) ?? null;
 
   const setMode = (next: CaptureMode) => {
     modeRef.current = next;
@@ -71,6 +193,54 @@ export default function App() {
     try { await appWindow.unminimize(); } catch { /* The window may not be minimized. */ }
     try { await appWindow.setFocus(); } catch { /* Windows can deny foreground focus. */ }
   }, []);
+
+  const addDocument = useCallback((initial: Omit<CaptureDocument, "id" | "captureSession" | "saving">) => {
+    const document: CaptureDocument = {
+      ...initial,
+      id: crypto.randomUUID(),
+      captureSession: ++captureSessionRef.current,
+      saving: false
+    };
+    setDocuments((current) => {
+      const next = [...current, document];
+      documentsRef.current = next;
+      return next;
+    });
+    setActiveDocumentId(document.id);
+  }, []);
+
+  const updateDocument = useCallback((id: string, patch: Partial<CaptureDocument>) => {
+    setDocuments((current) => {
+      const next = current.map((document) => document.id === id ? { ...document, ...patch } : document);
+      documentsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const removeDocument = useCallback((id: string) => {
+    const current = documentsRef.current;
+    const index = current.findIndex((document) => document.id === id);
+    if (index < 0) return;
+    const nextActiveId = current[index + 1]?.id ?? current[index - 1]?.id ?? null;
+    const next = current.filter((document) => document.id !== id);
+    documentsRef.current = next;
+    setDocuments(next);
+    setActiveDocumentId((activeId) => activeId === id ? nextActiveId : activeId);
+  }, []);
+
+  const beginUnsavedDocument = useCallback((result: CaptureResult, suggestedName = "Untitled.capsage") => {
+    const state = emptyDocumentState();
+    const style = loadActiveCaptureStyle();
+    addDocument({
+      capture: result,
+      state,
+      path: null,
+      name: suggestedName,
+      createdAt: new Date().toISOString(),
+      baseline: documentBaseline(result, state, style),
+      style
+    });
+  }, [addDocument]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -94,13 +264,23 @@ export default function App() {
     try {
       if (!appWindow) throw new Error("Screen capture is available in the CapSage desktop app.");
       if (captureMode === "region") {
-        await invoke("start_region_selection");
+        const storedWidth = Number.parseInt(localStorage.getItem(REGION_WIDTH_KEY) ?? "", 10);
+        const storedHeight = Number.parseInt(localStorage.getItem(REGION_HEIGHT_KEY) ?? "", 10);
+        const storedX = Number.parseInt(localStorage.getItem(REGION_X_KEY) ?? "", 10);
+        const storedY = Number.parseInt(localStorage.getItem(REGION_Y_KEY) ?? "", 10);
+        const hasStoredSize = Number.isFinite(storedWidth) && storedWidth > 0
+          && Number.isFinite(storedHeight) && storedHeight > 0;
+        const hasStoredPosition = Number.isFinite(storedX) && Number.isFinite(storedY);
+        await invoke("start_region_selection", {
+          width: hasStoredSize ? storedWidth : null,
+          height: hasStoredSize ? storedHeight : null,
+          x: hasStoredPosition ? storedX : null,
+          y: hasStoredPosition ? storedY : null
+        });
         return;
       }
       const result = await invoke<CaptureResult>("capture_active_window");
-      setCapture(result);
-      setCaptureSession((session) => session + 1);
-      setStage("edit");
+      beginUnsavedDocument(result);
       await restoreMainWindow();
     } catch (error) {
       await restoreMainWindow();
@@ -109,16 +289,18 @@ export default function App() {
       capturingRef.current = false;
       setCapturing(false);
     }
-  }, [restoreMainWindow, showNotice]);
+  }, [beginUnsavedDocument, restoreMainWindow, showNotice]);
 
   useEffect(() => {
     if (!isTauri()) return;
     const stops: Array<() => void> = [];
     Promise.all([
       listen<CaptureResult>("region-selected", (event) => {
-        setCapture(event.payload);
-        setCaptureSession((session) => session + 1);
-        setStage("edit");
+        localStorage.setItem(REGION_WIDTH_KEY, String(event.payload.width));
+        localStorage.setItem(REGION_HEIGHT_KEY, String(event.payload.height));
+        localStorage.setItem(REGION_X_KEY, String(event.payload.originX));
+        localStorage.setItem(REGION_Y_KEY, String(event.payload.originY));
+        beginUnsavedDocument(event.payload);
         void restoreMainWindow();
       }),
       listen("region-selection-cancelled", () => void restoreMainWindow()),
@@ -128,7 +310,7 @@ export default function App() {
       })
     ]).then((unlisteners) => stops.push(...unlisteners));
     return () => stops.forEach((stop) => stop());
-  }, [restoreMainWindow, showNotice]);
+  }, [beginUnsavedDocument, restoreMainWindow, showNotice]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -225,17 +407,114 @@ export default function App() {
     }
   };
 
-  const saveImage = useCallback(async (dataUrl: string, format: "png" | "jpeg") => {
+  const openFile = useCallback(async () => {
+    if (!isTauri()) {
+      showNotice({ tone: "error", message: "Opening files is available in the CapSage desktop app." });
+      return;
+    }
+    try {
+      const chosen = await open({
+        title: "Open a CapSage document or image",
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "CapSage documents and images", extensions: ["capsage", "png", "jpg", "jpeg"] },
+          { name: "CapSage document", extensions: ["capsage"] },
+          { name: "PNG or JPEG image", extensions: ["png", "jpg", "jpeg"] }
+        ]
+      });
+      if (!chosen || Array.isArray(chosen)) return;
+      const opened = await invoke<OpenedCaptureFile>("open_capture_file", { path: chosen });
+      const nextCapture: CaptureResult = {
+        dataUrl: opened.dataUrl,
+        width: opened.width,
+        height: opened.height,
+        originX: opened.originX,
+        originY: opened.originY
+      };
+      if (opened.kind === "document") {
+        if (!opened.manifestJson) throw new Error("The CapSage document has no manifest.");
+        const restored = parseManifest(opened.manifestJson);
+        addDocument({
+          capture: nextCapture,
+          state: restored.state,
+          path: chosen,
+          name: fileName(chosen),
+          createdAt: restored.createdAt,
+          baseline: documentBaseline(nextCapture, restored.state, restored.captureStyle),
+          style: restored.captureStyle
+        });
+        showNotice({ tone: "success", message: `Opened ${fileName(chosen)}` });
+      } else {
+        beginUnsavedDocument(nextCapture, capsageNameFor(chosen));
+        showNotice({ tone: "success", message: `Imported ${fileName(chosen)}` });
+      }
+    } catch (error) {
+      showNotice({ tone: "error", message: String(error) });
+    }
+  }, [addDocument, beginUnsavedDocument, showNotice]);
+
+  const saveDocument = useCallback(async (
+    documentId: string,
+    state: EditorDocumentState,
+    saveAs: boolean
+  ) => {
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    if (!document || !isTauri()) {
+      showNotice({ tone: "error", message: "Saving documents is available in the CapSage desktop app." });
+      return;
+    }
+    updateDocument(documentId, { saving: true });
+    try {
+      let path = saveAs ? null : document.path;
+      if (!path) {
+        const chosenPath = await save({
+          title: saveAs ? "Save CapSage document as" : "Save CapSage document",
+          defaultPath: document.path ?? document.name,
+          filters: [{ name: "CapSage document", extensions: ["capsage"] }]
+        });
+        if (!chosenPath) return;
+        path = chosenPath.toLowerCase().endsWith(".capsage") ? chosenPath : `${chosenPath}.capsage`;
+      }
+      const manifest = createManifest(document.capture, state, document.style, document.createdAt);
+      await invoke("save_capsage_document", {
+        path,
+        manifestJson: JSON.stringify(manifest),
+        dataUrl: document.capture.dataUrl
+      });
+      updateDocument(documentId, {
+        path,
+        name: fileName(path),
+        baseline: documentBaseline(document.capture, state, document.style)
+      });
+      showNotice({ tone: "success", message: `Saved ${path}` });
+    } catch (error) {
+      showNotice({ tone: "error", message: String(error) });
+    } finally {
+      updateDocument(documentId, { saving: false });
+    }
+  }, [showNotice, updateDocument]);
+
+  const exportImage = useCallback(async (
+    documentId: string,
+    dataUrl: string,
+    format: "png" | "jpeg"
+  ) => {
     const extension = format === "png" ? "png" : "jpg";
     if (!isTauri()) {
       showNotice({ tone: "error", message: "Saving is available in the CapSage desktop app." });
       return false;
     }
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    if (!document) return false;
     const storedSequence = Number.parseInt(localStorage.getItem(SAVE_SEQUENCE_KEY) || "1", 10);
     const sequence = Number.isFinite(storedSequence) && storedSequence > 0 ? storedSequence : 1;
+    const defaultPath = document.path
+      ? document.path.replace(/\.capsage$/i, `.${extension}`)
+      : `CapSage ${sequence}.${extension}`;
     const chosenPath = await save({
-      title: "Save CapSage image",
-      defaultPath: `CapSage ${sequence}.${extension}`,
+      title: "Export CapSage image",
+      defaultPath,
       filters: [
         format === "png"
           ? { name: "PNG image", extensions: ["png"] }
@@ -246,13 +525,46 @@ export default function App() {
     const path = /\.[a-z0-9]+$/i.test(chosenPath) ? chosenPath : `${chosenPath}.${extension}`;
     await invoke("save_image", { path, dataUrl });
     localStorage.setItem(SAVE_SEQUENCE_KEY, String(sequence + 1));
-    showNotice({ tone: "success", message: `Saved ${path}` });
+    showNotice({ tone: "success", message: `Exported ${path}` });
     return true;
   }, [showNotice]);
 
+  const requestCloseDocument = useCallback((documentId: string) => {
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    if (!document) return;
+    if (document.saving) {
+      showNotice({ tone: "error", message: `Wait for ${document.name} to finish saving before closing it.` });
+      return;
+    }
+    if (isDocumentDirty(document)) {
+      setPendingCloseDocumentId(documentId);
+      return;
+    }
+    removeDocument(documentId);
+  }, [removeDocument, showNotice]);
+
+  const confirmCloseDocument = useCallback(() => {
+    const documentId = pendingCloseDocumentId;
+    if (!documentId) return;
+    const document = documentsRef.current.find((candidate) => candidate.id === documentId);
+    setPendingCloseDocumentId(null);
+    if (!document) return;
+    if (document.saving) {
+      showNotice({ tone: "error", message: `Wait for ${document.name} to finish saving before closing it.` });
+      return;
+    }
+    removeDocument(documentId);
+  }, [pendingCloseDocumentId, removeDocument, showNotice]);
+
   return (
     <main className="app-shell">
-      <TitleBar updateAvailable={startupUpdate !== null} onAbout={() => setAboutOpen(true)} />
+      <TitleBar
+        updateAvailable={startupUpdate !== null}
+        documentLabel={activeDocument?.name ?? null}
+        documentDirty={activeDocumentDirty}
+        onOpen={() => void openFile()}
+        onAbout={() => setAboutOpen(true)}
+      />
       <div className="capture-bar">
         <span className="capture-label">Capture mode</span>
         <div className="mode-switch" role="group" aria-label="Capture mode">
@@ -282,14 +594,50 @@ export default function App() {
         </div>
       </div>
 
-      <CaptureStyleToolbar
-        hasCapture={stage === "edit" && Boolean(capture)}
-        captureSession={captureSession}
-        onStyleChange={setCaptureStyle}
-      />
+      {documents.length > 0 && (
+        <div className="capture-tabs" role="tablist" aria-label="Open captures">
+          {documents.map((document) => {
+            const active = document.id === activeDocumentId;
+            const dirty = isDocumentDirty(document);
+            const label = document.path ? document.name : "New Capture";
+            return (
+              <div className={`capture-tab ${active ? "active" : ""}`} key={document.id}>
+                <button
+                  id={`capture-tab-${document.id}`}
+                  type="button"
+                  className="capture-tab-select"
+                  role="tab"
+                  aria-selected={active}
+                  aria-controls={`capture-panel-${document.id}`}
+                  aria-label={dirty ? `${label}, unsaved changes` : label}
+                  title={document.path ?? document.name}
+                  onClick={() => setActiveDocumentId(document.id)}
+                >
+                  <span>
+                    {label}
+                    {dirty && <i className="capture-tab-dirty" aria-hidden="true">*</i>}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="capture-tab-close"
+                  aria-label={`Close ${label}`}
+                  title={document.saving ? "Saving…" : `Close ${label}`}
+                  disabled={document.saving}
+                  onClick={() => requestCloseDocument(document.id)}
+                >
+                  {document.saving
+                    ? <SpinnerGap className="spin" size={13} />
+                    : <X size={13} weight="bold" />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="app-content">
-        {stage === "empty" && (
+        {documents.length === 0 && (
           <section className="empty-state">
             <div className="empty-glow" />
             <div className="empty-icon"><img src="/icon.ico" alt="" /></div>
@@ -310,18 +658,16 @@ export default function App() {
             </div>
           </section>
         )}
-        {stage === "edit" && capture && (
-          <Editor
-            capture={capture}
-            captureStyle={captureStyle}
-            onCrop={setCapture}
-            onSave={saveImage}
-            onClear={() => {
-              setCapture(null);
-              setStage("empty");
-            }}
+        {documents.map((document) => (
+          <CaptureDocumentPanel
+            key={document.id}
+            document={document}
+            active={document.id === activeDocumentId}
+            onUpdate={updateDocument}
+            onSave={saveDocument}
+            onExport={exportImage}
           />
-        )}
+        ))}
       </div>
 
       {notice && (
@@ -329,6 +675,40 @@ export default function App() {
           {notice.tone === "success" ? <CheckCircle size={19} weight="fill" /> : <WarningCircle size={19} weight="fill" />}
           <span>{notice.message}</span>
           <button onClick={() => setNotice(null)} aria-label="Dismiss">×</button>
+        </div>
+      )}
+
+      {pendingCloseDocument && (
+        <div
+          className="confirm-overlay"
+          role="presentation"
+          onPointerDown={() => setPendingCloseDocumentId(null)}
+        >
+          <div
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="close-capture-title"
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <div className="confirm-icon"><WarningCircle size={22} weight="fill" /></div>
+            <div className="confirm-copy">
+              <h2 id="close-capture-title">Close {pendingCloseDocument.path ? pendingCloseDocument.name : "this capture"}?</h2>
+              <p>This capture has unsaved changes. Closing it will discard them.</p>
+            </div>
+            <div className="confirm-actions">
+              <button
+                autoFocus
+                className="button secondary"
+                onClick={() => setPendingCloseDocumentId(null)}
+              >
+                Cancel
+              </button>
+              <button className="button danger" onClick={confirmCloseDocument}>
+                Close without saving
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

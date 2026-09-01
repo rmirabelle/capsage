@@ -22,7 +22,13 @@ export function DesktopRegionSelector() {
   const completedRef = useRef(false);
   const finishRef = useRef<() => Promise<void>>(async () => {});
   const [finishing, setFinishing] = useState(false);
-  const [size, setSize] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const [size, setSize] = useState(() => {
+    const scaleFactor = window.devicePixelRatio || 1;
+    return {
+      width: Math.round(window.innerWidth * scaleFactor),
+      height: Math.round(window.innerHeight * scaleFactor)
+    };
+  });
 
   const closeWithError = async (payload: string) => {
     if (completedRef.current) return;
@@ -39,6 +45,7 @@ export function DesktopRegionSelector() {
 
   useEffect(() => {
     let disposed = false;
+    let stopResize: (() => void) | undefined;
 
     const activate = async () => {
       try {
@@ -60,16 +67,25 @@ export function DesktopRegionSelector() {
         void finishRef.current();
       }
     };
-    const onResize = () => setSize({ width: window.innerWidth, height: window.innerHeight });
 
     window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("resize", onResize);
+    void selectorWindow.outerSize()
+      .then((nativeSize) => {
+        if (!disposed) setSize({ width: nativeSize.width, height: nativeSize.height });
+      })
+      .catch(() => {});
+    void selectorWindow.onResized(({ payload: nativeSize }) => {
+      if (!disposed) setSize({ width: nativeSize.width, height: nativeSize.height });
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stopResize = unlisten;
+    }).catch(() => {});
     void activate();
 
     return () => {
       disposed = true;
+      stopResize?.();
       window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("resize", onResize);
     };
   }, []);
 

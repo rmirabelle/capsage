@@ -36,6 +36,27 @@ export const FOCUS_RADIUS = 18;
 export const FOCUS_BLUR = 2;
 export const MIN_FOCUS_SIZE = 56;
 
+export function loadCaptureStyles(): CaptureStyle[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CAPTURE_STYLES_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [{ ...DEFAULT_CAPTURE_STYLE }];
+    const saved = parsed
+      .filter((style): style is Partial<CaptureStyle> & { id: string; name: string } =>
+        Boolean(style && typeof style.id === "string" && typeof style.name === "string"))
+      .map((style) => ({ ...DEFAULT_CAPTURE_STYLE, ...style }));
+    const custom = saved.filter((style) => style.id !== DEFAULT_CAPTURE_STYLE.id);
+    return [{ ...DEFAULT_CAPTURE_STYLE }, ...custom];
+  } catch {
+    return [{ ...DEFAULT_CAPTURE_STYLE }];
+  }
+}
+
+export function loadActiveCaptureStyle(): CaptureStyle {
+  const styles = loadCaptureStyles();
+  const activeId = localStorage.getItem(ACTIVE_CAPTURE_STYLE_KEY) ?? DEFAULT_CAPTURE_STYLE.id;
+  return { ...(styles.find((style) => style.id === activeId) ?? styles[0] ?? DEFAULT_CAPTURE_STYLE) };
+}
+
 export const calloutFontSize = (style: CaptureStyle) => style.fontSize * style.calloutScale;
 export const calloutPaddingX = (style: CaptureStyle) => CALLOUT_PADDING_X * style.calloutScale;
 export const calloutPaddingY = (style: CaptureStyle) => CALLOUT_PADDING_Y * style.calloutScale;

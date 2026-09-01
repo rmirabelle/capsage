@@ -81,7 +81,10 @@ Assert-FileContains "src-tauri/installer.nsi" @(
   'CopyFiles /SILENT "$INSTDIR\icons\icon.ico" "C:\Users\Public\${PRODUCTNAME}\icon.ico"',
   'Function CreateOrUpdateStartMenuShortcut',
   'Function CreateOrUpdateDesktopShortcut',
-  'SetLnkAppUserModelId'
+  'SetLnkAppUserModelId',
+  '!macro StopCapSageIfRunning executableName productName',
+  'nsis_tauri_utils::KillProcessCurrentUser "${executableName}"',
+  '!insertmacro StopCapSageIfRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"'
 )
 
 $cargoVersion = Read-Version "src-tauri/Cargo.toml" '(?m)^version\s*=\s*"([^"]+)"'
@@ -127,7 +130,9 @@ Assert-FileContains $generatedNsis @(
   'CopyFiles /SILENT "$INSTDIR\icons\icon.ico" "C:\Users\Public\${PRODUCTNAME}\icon.ico"',
   'CreateShortcut "$SMPROGRAMS\$AppStartMenuFolder\${PRODUCTNAME}.lnk"',
   'CreateShortcut "$DESKTOP\${PRODUCTNAME}.lnk"',
-  'SetLnkAppUserModelId'
+  'SetLnkAppUserModelId',
+  '!macro StopCapSageIfRunning executableName productName',
+  'nsis_tauri_utils::KillProcessCurrentUser "${executableName}"'
 )
 
 $bundleDir = "src-tauri/target/release/bundle/nsis"
