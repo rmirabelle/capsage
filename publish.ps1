@@ -17,6 +17,37 @@ param()
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
 
+function Invoke-Native {
+  <#
+  .SYNOPSIS
+    Run a native command (git, gh, npm, cargo) safely under Windows PowerShell 5.1.
+
+  .DESCRIPTION
+    Windows PowerShell 5.1 converts a native command's stderr output into
+    NativeCommandError records whenever stderr is redirected or the host is not
+    a console. With $ErrorActionPreference = "Stop" the first such line aborts
+    the script even though the command succeeded (cargo prints "Compiling" to
+    stderr; gh prints "release not found" to stderr). This wrapper runs the
+    command with the preference set to Continue, restores it afterwards, and
+    fails on the exit code instead, which is the only reliable signal.
+    Standard output flows through unchanged, so results can be captured.
+  #>
+  param(
+    [Parameter(Mandatory = $true, Position = 0)] [scriptblock] $Command,
+    [string] $FailureMessage,
+    [switch] $AllowFailure
+  )
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  $global:LASTEXITCODE = 0
+  try { & $Command }
+  finally { $ErrorActionPreference = $previousPreference }
+  if (-not $AllowFailure -and $LASTEXITCODE -ne 0) {
+    if (-not $FailureMessage) { $FailureMessage = "Command failed with exit code ${LASTEXITCODE}: $Command" }
+    throw $FailureMessage
+  }
+}
+
 function Read-Version {
   param([string] $Path, [string] $Pattern)
   $match = [regex]::Match((Get-Content $Path -Raw), $Pattern)
@@ -99,29 +130,22 @@ $tag = "v$version"
 $assetName = "CapSage_${version}_x64-setup.exe"
 $assetPath = "dist/$assetName"
 
-git rev-parse --is-inside-work-tree 2>$null | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "CapSage is not a Git repository." }
-if (git status --porcelain) { throw "The working tree must be clean before publishing." }
+Invoke-Native -FailureMessage "CapSage is not a Git repository." { git rev-parse --is-inside-work-tree *> $null }
+$dirtyFiles = Invoke-Native -FailureMessage "Could not read the Git working tree status." { git status --porcelain }
+if ($dirtyFiles) { throw "The working tree must be clean before publishing." }
 
-$origin = git remote get-url origin
+$origin = Invoke-Native -AllowFailure { git remote get-url origin }
 if ($LASTEXITCODE -ne 0 -or $origin -notmatch 'github\.com[/:]rmirabelle/capsage(?:\.git)?$') {
   throw "The origin remote must be the public rmirabelle/capsage GitHub repository."
 }
 
-gh auth status | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated. Run: gh auth login -h github.com" }
+Invoke-Native -FailureMessage "GitHub CLI is not authenticated. Run: gh auth login -h github.com" { gh auth status *> $null }
 
-# gh writes "release not found" to stderr; under Stop that would abort the script.
-$previousErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-gh release view $tag *> $null
-$releaseExists = ($LASTEXITCODE -eq 0)
-$ErrorActionPreference = $previousErrorActionPreference
-if ($releaseExists) { throw "Release $tag already exists." }
+Invoke-Native -AllowFailure { gh release view $tag *> $null }
+if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists." }
 
 Write-Host "==> Building CapSage $tag ..." -ForegroundColor Cyan
-npm run tauri build
-if ($LASTEXITCODE -ne 0) { throw "Tauri build failed" }
+Invoke-Native -FailureMessage "Tauri build failed" { npm run tauri build }
 
 $releaseExe = "src-tauri/target/release/capsage.exe"
 if ((Get-PeSubsystem $releaseExe) -ne 2) {
@@ -148,19 +172,14 @@ New-Item -ItemType Directory -Force -Path "dist" | Out-Null
 Copy-Item $installer.FullName $assetPath -Force
 
 Write-Host "==> Pushing source and tag $tag ..." -ForegroundColor Cyan
-git push origin HEAD
-if ($LASTEXITCODE -ne 0) { throw "Could not push the release commit" }
-git tag -a $tag -m "CapSage $tag"
-if ($LASTEXITCODE -ne 0) { throw "Could not create tag $tag" }
-git push origin $tag
-if ($LASTEXITCODE -ne 0) { throw "Could not push tag $tag" }
+Invoke-Native -FailureMessage "Could not push the release commit" { git push origin HEAD }
+Invoke-Native -FailureMessage "Could not create tag $tag" { git tag -a $tag -m "CapSage $tag" }
+Invoke-Native -FailureMessage "Could not push tag $tag" { git push origin $tag }
 
 Write-Host "==> Publishing GitHub release $tag ..." -ForegroundColor Cyan
-gh release create $tag $assetPath --verify-tag --title "CapSage $tag" --generate-notes
-if ($LASTEXITCODE -ne 0) { throw "Could not create GitHub release $tag" }
+Invoke-Native -FailureMessage "Could not create GitHub release $tag" { gh release create $tag $assetPath --verify-tag --title "CapSage $tag" --generate-notes }
 
-$publishedReleaseJson = gh release view $tag --json tagName,isDraft,isPrerelease,assets
-if ($LASTEXITCODE -ne 0) { throw "Could not verify GitHub release $tag" }
+$publishedReleaseJson = Invoke-Native -FailureMessage "Could not verify GitHub release $tag" { gh release view $tag --json tagName,isDraft,isPrerelease,assets }
 $publishedRelease = $publishedReleaseJson | ConvertFrom-Json
 $publishedAssets = @($publishedRelease.assets | ForEach-Object { $_.name })
 if (
@@ -172,8 +191,7 @@ if (
   throw "GitHub release $tag did not pass post-publish verification. Older releases were preserved."
 }
 
-$latestReleaseJson = gh api repos/rmirabelle/capsage/releases/latest
-if ($LASTEXITCODE -ne 0) { throw "Could not verify the latest-release endpoint. Older releases were preserved." }
+$latestReleaseJson = Invoke-Native -FailureMessage "Could not verify the latest-release endpoint. Older releases were preserved." { gh api repos/rmirabelle/capsage/releases/latest }
 $latestRelease = $latestReleaseJson | ConvertFrom-Json
 $latestAssets = @($latestRelease.assets | ForEach-Object { $_.name })
 if ($latestRelease.tag_name -ne $tag -or $latestAssets -notcontains $assetName) {
@@ -181,13 +199,11 @@ if ($latestRelease.tag_name -ne $tag -or $latestAssets -notcontains $assetName) 
 }
 
 Write-Host "==> Removing superseded releases ..." -ForegroundColor Cyan
-$priorReleases = @(gh release list --limit 100 --json tagName -q '.[].tagName')
-if ($LASTEXITCODE -ne 0) { throw "Could not list existing GitHub releases" }
+$priorReleases = @(Invoke-Native -FailureMessage "Could not list existing GitHub releases" { gh release list --limit 100 --json tagName -q '.[].tagName' })
 foreach ($priorTag in $priorReleases) {
   if ($priorTag -and $priorTag -ne $tag) {
     Write-Host "    - deleting $priorTag"
-    gh release delete $priorTag --yes --cleanup-tag
-    if ($LASTEXITCODE -ne 0) { throw "Could not delete superseded release $priorTag" }
+    Invoke-Native -FailureMessage "Could not delete superseded release $priorTag" { gh release delete $priorTag --yes --cleanup-tag }
   }
 }
 

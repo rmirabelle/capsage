@@ -13,6 +13,9 @@
   build is not authorization to publish.
 - Use `set-version.ps1` and `publish.ps1`; do not manually create release tags or
   GitHub releases.
+- Inside those scripts, call `git`, `gh`, `npm`, and `cargo` only through the
+  `Invoke-Native` helper. Windows PowerShell 5.1 otherwise aborts on harmless
+  stderr output (see `docs/RELEASING.md`).
 - The publish workflow intentionally deletes superseded releases only after the
   new release and its installer asset pass verification.
 

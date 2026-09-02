@@ -79,6 +79,24 @@ The script creates and verifies the new public release first, then deletes every
 older release and its tag. If verification fails before cleanup, older releases
 are intentionally preserved.
 
+## Windows PowerShell 5.1 note
+
+`set-version.ps1` and `publish.ps1` run under Windows PowerShell 5.1 with
+`$ErrorActionPreference = "Stop"`. In 5.1, a native command's stderr output
+becomes a `NativeCommandError` record whenever stderr is redirected or the host
+is not a plain console (for example an agent tool, CI, or `*> $null`). Under
+`Stop`, the first such line aborts the script even though the command succeeded:
+`cargo` prints `Compiling ...` to stderr, and `gh release view` prints
+`release not found` to stderr.
+
+Both scripts therefore call every native command (`git`, `gh`, `npm`, `cargo`)
+through the `Invoke-Native` helper, which temporarily sets the preference to
+`Continue` and fails on the exit code instead. Keep that pattern when adding new
+native calls; never call a native command directly in these scripts. Red
+`NativeCommandError` text in a captured run is only echoed stderr, not a failure.
+The scripts can be run directly from any host; a separate console window is not
+required.
+
 ## Codex workspace note
 
 If Git reports dubious ownership only inside the managed Codex environment, use a
