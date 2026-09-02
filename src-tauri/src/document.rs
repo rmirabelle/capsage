@@ -10,7 +10,7 @@ use std::{
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const DOCUMENT_FORMAT: &str = "capsage-document";
-const DOCUMENT_VERSION: u64 = 1;
+const DOCUMENT_VERSION: u64 = 2;
 const MAX_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 512 * 1024 * 1024;
 
@@ -62,7 +62,7 @@ fn validate_manifest(manifest: &Value) -> Result<(), String> {
         .get("formatVersion")
         .and_then(Value::as_u64)
         .ok_or_else(|| "The CapSage document has no valid format version".to_string())?;
-    if version != DOCUMENT_VERSION {
+    if version != 1 && version != DOCUMENT_VERSION {
         return Err(format!(
             "This CapSage document uses unsupported format version {version}"
         ));
@@ -217,6 +217,15 @@ mod tests {
     const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
     #[test]
+    fn accepts_legacy_version_one_documents() {
+        let manifest = serde_json::json!({
+            "format": DOCUMENT_FORMAT,
+            "formatVersion": 1
+        });
+        validate_manifest(&manifest).unwrap();
+    }
+
+    #[test]
     fn capsage_document_round_trip_preserves_manifest_and_image() {
         let path = std::env::temp_dir().join(format!(
             "capsage-document-test-{}-{}.capsage",
@@ -241,7 +250,8 @@ mod tests {
             },
             "captureStyle": {},
             "callouts": [{ "id": "callout-1" }],
-            "focusRegions": [{ "id": "focus-1" }]
+            "focusRegions": [{ "id": "focus-1" }],
+            "crop": { "x": 0, "y": 0, "width": 1, "height": 1 }
         });
 
         save_capsage_document(
@@ -259,6 +269,7 @@ mod tests {
             serde_json::from_str(opened.manifest_json.as_deref().unwrap()).unwrap();
         assert_eq!(restored["callouts"][0]["id"], "callout-1");
         assert_eq!(restored["focusRegions"][0]["id"], "focus-1");
+        assert_eq!(restored["crop"]["width"], 1);
 
         std::fs::remove_file(path).unwrap();
     }

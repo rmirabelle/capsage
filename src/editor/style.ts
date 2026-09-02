@@ -44,8 +44,9 @@ export function loadCaptureStyles(): CaptureStyle[] {
       .filter((style): style is Partial<CaptureStyle> & { id: string; name: string } =>
         Boolean(style && typeof style.id === "string" && typeof style.name === "string"))
       .map((style) => ({ ...DEFAULT_CAPTURE_STYLE, ...style }));
+    const original = saved.find((style) => style.id === DEFAULT_CAPTURE_STYLE.id);
     const custom = saved.filter((style) => style.id !== DEFAULT_CAPTURE_STYLE.id);
-    return [{ ...DEFAULT_CAPTURE_STYLE }, ...custom];
+    return [{ ...(original ?? DEFAULT_CAPTURE_STYLE) }, ...custom];
   } catch {
     return [{ ...DEFAULT_CAPTURE_STYLE }];
   }

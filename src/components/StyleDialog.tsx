@@ -1,4 +1,4 @@
-import { FloppyDisk, Lightning, Palette, SlidersHorizontal, Trash } from "@phosphor-icons/react";
+import { FloppyDisk, Palette, SlidersHorizontal, Trash } from "@phosphor-icons/react";
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { drawCallout, measureCalloutForText } from "../editor/draw";
 import type { CaptureStyle } from "../editor/style";
@@ -6,11 +6,9 @@ import type { CaptureStyle } from "../editor/style";
 interface Props {
   style: CaptureStyle;
   isOriginal: boolean;
-  canApply: boolean;
   onChange: (style: CaptureStyle) => void;
   onCancel: () => void;
   onReset: () => void;
-  onApply: () => void;
   onSave: () => void;
   onSaveAs: () => void;
   onDelete: () => void;
@@ -315,11 +313,9 @@ function CalloutPreview({ style }: { style: CaptureStyle }) {
 export function StyleDialog({
   style,
   isOriginal,
-  canApply,
   onChange,
   onCancel,
   onReset,
-  onApply,
   onSave,
   onSaveAs,
   onDelete
@@ -346,7 +342,7 @@ export function StyleDialog({
           <div className="style-dialog-icon"><Palette size={23} weight="duotone" /></div>
           <div>
             <h2 id="style-dialog-title">Edit Style</h2>
-            <p>Editing <strong>{style.name}</strong> · Preview changes here, then apply or save them.</p>
+            <p>Editing <strong>{style.name}</strong> · Saved changes update every capture using this style.</p>
           </div>
         </header>
 
@@ -469,18 +465,8 @@ export function StyleDialog({
               )}
               <span />
               <button className="button secondary" onClick={onCancel}>Cancel</button>
-              <button
-                className="button secondary"
-                disabled={!canApply}
-                title={canApply ? "Apply to the current capture" : "Take a capture to apply temporary style changes"}
-                onClick={onApply}
-              >
-                <Lightning size={15} weight="fill" /> Apply
-              </button>
               <button className="button secondary" onClick={onSaveAs}><FloppyDisk size={15} /> Save as…</button>
-              {!isOriginal && (
-                <button className="button primary" disabled={!hasChanges} onClick={onSave}>Save Changes</button>
-              )}
+              <button className="button primary" disabled={!hasChanges} onClick={onSave}>Save Changes</button>
             </>
           )}
         </footer>

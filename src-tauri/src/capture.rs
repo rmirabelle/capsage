@@ -280,27 +280,29 @@ mod windows_capture {
     use super::{png_result, CaptureResult};
     use std::{ffi::c_void, mem::size_of, ptr::null_mut, slice};
     use windows::Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::{
             Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
             Gdi::{
-                BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
-                ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT,
-                DIB_RGB_COLORS, HGDIOBJ, ROP_CODE, SRCCOPY,
+                BitBlt, ClientToScreen, CreateCompatibleDC, CreateDIBSection, DeleteDC,
+                DeleteObject, GetDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+                CAPTUREBLT, DIB_RGB_COLORS, HGDIOBJ, ROP_CODE, SRCCOPY,
             },
         },
         UI::{
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
-                GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect, IsIconic,
-                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-                WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP,
-                WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_MOVING, WM_NCDESTROY, WM_SIZING,
+                GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
+                IsIconic, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                SM_YVIRTUALSCREEN, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
+                WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_MOVING, WM_NCDESTROY,
+                WM_SIZING,
             },
         },
     };
 
     const SELECTOR_BOUNDS_SUBCLASS_ID: usize = 0x4353_4244;
+    const MAX_CUSTOM_FRAME_INSET: i32 = 4;
 
     #[derive(Clone, Copy)]
     struct SelectorBounds {
@@ -480,6 +482,68 @@ mod windows_capture {
         }
     }
 
+    fn custom_frame_client_bounds(frame: RECT, client: RECT) -> Option<RECT> {
+        if client.right <= client.left || client.bottom <= client.top {
+            return None;
+        }
+
+        let insets = [
+            client.left - frame.left,
+            client.top - frame.top,
+            frame.right - client.right,
+            frame.bottom - client.bottom,
+        ];
+        insets
+            .iter()
+            .all(|inset| (0..=MAX_CUSTOM_FRAME_INSET).contains(inset))
+            .then_some(client)
+    }
+
+    unsafe fn active_window_bounds(window: HWND) -> Result<RECT, String> {
+        let mut frame = RECT::default();
+        if unsafe {
+            DwmGetWindowAttribute(
+                window,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut frame as *mut RECT).cast(),
+                size_of::<RECT>() as u32,
+            )
+        }
+        .is_err()
+        {
+            unsafe { GetWindowRect(window, &mut frame) }
+                .map_err(|error| format!("Could not read the active window bounds: {error}"))?;
+        }
+
+        // Custom-framed windows commonly leave a one-pixel DWM border around a
+        // client surface that otherwise reaches every edge. Capturing the DWM
+        // rectangle copies that translucent fringe from the composed desktop.
+        // A normally decorated window has a much larger top inset for its native
+        // title bar, so retain the full frame in that case.
+        let mut client = RECT::default();
+        if unsafe { GetClientRect(window, &mut client) }.is_ok() {
+            let client_width = client.right - client.left;
+            let client_height = client.bottom - client.top;
+            let mut origin = POINT {
+                x: client.left,
+                y: client.top,
+            };
+            if unsafe { ClientToScreen(window, &mut origin) }.as_bool() {
+                let client_screen = RECT {
+                    left: origin.x,
+                    top: origin.y,
+                    right: origin.x + client_width,
+                    bottom: origin.y + client_height,
+                };
+                if let Some(bounds) = custom_frame_client_bounds(frame, client_screen) {
+                    return Ok(bounds);
+                }
+            }
+        }
+
+        Ok(frame)
+    }
+
     pub fn active_window() -> Result<CaptureResult, String> {
         unsafe {
             let window = GetForegroundWindow();
@@ -490,18 +554,7 @@ mod windows_capture {
                 return Err("The active window is minimized".into());
             }
 
-            let mut bounds = RECT::default();
-            if DwmGetWindowAttribute(
-                window,
-                DWMWA_EXTENDED_FRAME_BOUNDS,
-                (&mut bounds as *mut RECT).cast(),
-                size_of::<RECT>() as u32,
-            )
-            .is_err()
-            {
-                GetWindowRect(window, &mut bounds)
-                    .map_err(|error| format!("Could not read the active window bounds: {error}"))?;
-            }
+            let bounds = active_window_bounds(window)?;
 
             let width = bounds.right - bounds.left;
             let height = bounds.bottom - bounds.top;
@@ -591,6 +644,48 @@ mod windows_capture {
             let surface = DibCapture::new(width as i32, height as i32)?;
             surface.copy_screen(origin_x, origin_y)?;
             png_result(surface.pixels(), width, height, origin_x, origin_y)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::custom_frame_client_bounds;
+        use windows::Win32::Foundation::RECT;
+
+        #[test]
+        fn uses_client_surface_for_a_thin_custom_frame() {
+            let frame = RECT {
+                left: 2308,
+                top: 574,
+                right: 3642,
+                bottom: 1512,
+            };
+            let client = RECT {
+                left: 2309,
+                top: 575,
+                right: 3641,
+                bottom: 1511,
+            };
+
+            assert_eq!(custom_frame_client_bounds(frame, client), Some(client));
+        }
+
+        #[test]
+        fn keeps_native_title_bar_in_the_capture() {
+            let frame = RECT {
+                left: 100,
+                top: 100,
+                right: 1100,
+                bottom: 800,
+            };
+            let client = RECT {
+                left: 101,
+                top: 132,
+                right: 1099,
+                bottom: 799,
+            };
+
+            assert_eq!(custom_frame_client_bounds(frame, client), None);
         }
     }
 }

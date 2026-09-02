@@ -32,17 +32,16 @@ import {
   minCalloutWidth,
   type CaptureStyle
 } from "../editor/style";
-import type { Callout, CaptureResult, FocusRegion, Point } from "../editor/types";
+import type { Callout, CaptureResult, CropRegion, FocusRegion, Point } from "../editor/types";
 import { SaveDialog, type SaveFormat, type SaveSettings } from "./SaveDialog";
 
 type CalloutResizeHandle = "w" | "e";
 type FocusResizeHandle = "nw" | "n" | "ne" | "w" | "e" | "sw" | "s" | "se";
-type EditorSnapshot = { callouts: Callout[]; focuses: FocusRegion[] };
+type EditorSnapshot = { callouts: Callout[]; focuses: FocusRegion[]; crop: CropRegion | null };
 type PanState = { pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number };
 type CropDragState =
-  | { kind: "move"; start: Point; original: FocusRegion }
-  | { kind: "resize"; handle: FocusResizeHandle; original: FocusRegion };
-type PendingCrop = EditorSnapshot & { dataUrl: string };
+  | { kind: "move"; start: Point; original: CropRegion }
+  | { kind: "resize"; handle: FocusResizeHandle; original: CropRegion };
 type DragState =
   | { kind: "move-callout"; id: string; start: Point; original: Callout; before: EditorSnapshot }
   | { kind: "resize-callout"; id: string; handle: CalloutResizeHandle; original: Callout; before: EditorSnapshot }
@@ -54,33 +53,39 @@ interface Props {
   capture: CaptureResult;
   captureStyle: CaptureStyle;
   initialDocumentState: EditorDocumentState;
-  onCrop: (capture: CaptureResult) => void;
   onDocumentChange: (state: EditorDocumentState) => void;
   onSaveDocument: (state: EditorDocumentState, saveAs: boolean) => Promise<void>;
   documentSaving: boolean;
+  canSaveAs: boolean;
   onExport: (dataUrl: string, format: "png" | "jpeg") => Promise<boolean>;
+  onReplace: () => void;
+  replacementArmed: boolean;
 }
 
 const cloneCallouts = (callouts: Callout[]) => callouts.map((callout) => ({ ...callout }));
 const cloneFocuses = (focuses: FocusRegion[]) => focuses.map((focus) => ({ ...focus }));
+const cloneCrop = (crop: CropRegion | null) => crop ? { ...crop } : null;
 const ZOOM_LEVELS = [0.05, 0.067, 0.1, 0.125, 0.16, 0.2, 0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3];
 const SAVE_FORMAT_KEY = "capsage.save-format";
 const SAVE_MAX_WIDTH_KEY = "capsage.save-max-width";
 const SAVE_MAX_HEIGHT_KEY = "capsage.save-max-height";
 const cloneSnapshot = (snapshot: EditorSnapshot): EditorSnapshot => ({
   callouts: cloneCallouts(snapshot.callouts),
-  focuses: cloneFocuses(snapshot.focuses)
+  focuses: cloneFocuses(snapshot.focuses),
+  crop: cloneCrop(snapshot.crop)
 });
 
 export function Editor({
   capture,
   captureStyle,
   initialDocumentState,
-  onCrop,
   onDocumentChange,
   onSaveDocument,
   documentSaving,
-  onExport
+  canSaveAs,
+  onExport,
+  onReplace,
+  replacementArmed
 }: Props) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -89,8 +94,9 @@ export function Editor({
   const focusesRef = useRef<FocusRegion[]>([]);
   const dragRef = useRef<DragState | null>(null);
   const cropDragRef = useRef<CropDragState | null>(null);
-  const pendingCropRef = useRef<PendingCrop | null>(null);
   const initialDocumentStateRef = useRef(initialDocumentState);
+  initialDocumentStateRef.current = initialDocumentState;
+  const cropRef = useRef<CropRegion | null>(cloneCrop(initialDocumentState.crop));
   const panRef = useRef<PanState | null>(null);
   const textBeforeRef = useRef<EditorSnapshot | null>(null);
   const [ready, setReady] = useState(false);
@@ -100,6 +106,7 @@ export function Editor({
   const [panning, setPanning] = useState(false);
   const [callouts, setCalloutsState] = useState<Callout[]>([]);
   const [focuses, setFocusesState] = useState<FocusRegion[]>([]);
+  const [crop, setCropState] = useState<CropRegion | null>(cloneCrop(initialDocumentState.crop));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [past, setPast] = useState<EditorSnapshot[]>([]);
@@ -109,11 +116,16 @@ export function Editor({
   const [maxHeightInput, setMaxHeightInput] = useState(() => localStorage.getItem(SAVE_MAX_HEIGHT_KEY) ?? "");
   const [exporting, setExporting] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  const [cropRect, setCropRect] = useState<FocusRegion | null>(null);
+  const [cropRect, setCropRect] = useState<CropRegion | null>(null);
+
+  const fullViewport: CropRegion = { x: 0, y: 0, width: capture.width, height: capture.height };
+  const viewport = cropRect ? fullViewport : crop ?? fullViewport;
+  const viewportRight = viewport.x + viewport.width;
+  const viewportBottom = viewport.y + viewport.height;
 
   const fitScale = Math.min(
-    Math.max(0.05, ((workspaceSize.width - 48) * pixelRatio) / capture.width),
-    Math.max(0.05, ((workspaceSize.height - 48) * pixelRatio) / capture.height),
+    Math.max(0.05, ((workspaceSize.width - 48) * pixelRatio) / viewport.width),
+    Math.max(0.05, ((workspaceSize.height - 48) * pixelRatio) / viewport.height),
     1
   );
   const displayScale = zoom ?? fitScale;
@@ -134,35 +146,39 @@ export function Editor({
     setFocusesState(next);
   }, []);
 
+  const setCrop = useCallback((next: CropRegion | null) => {
+    cropRef.current = cloneCrop(next);
+    setCropState(cloneCrop(next));
+  }, []);
+
   const currentSnapshot = (): EditorSnapshot => ({
     callouts: cloneCallouts(calloutsRef.current),
-    focuses: cloneFocuses(focusesRef.current)
+    focuses: cloneFocuses(focusesRef.current),
+    crop: cloneCrop(cropRef.current)
   });
 
   const applySnapshot = useCallback((snapshot: EditorSnapshot) => {
     setCallouts(cloneCallouts(snapshot.callouts));
     setFocuses(cloneFocuses(snapshot.focuses));
-  }, [setCallouts, setFocuses]);
+    setCrop(cloneCrop(snapshot.crop));
+  }, [setCallouts, setCrop, setFocuses]);
 
   const record = useCallback((before: EditorSnapshot) => {
-    const current = { callouts: calloutsRef.current, focuses: focusesRef.current };
+    const current = { callouts: calloutsRef.current, focuses: focusesRef.current, crop: cropRef.current };
     if (JSON.stringify(before) === JSON.stringify(current)) return;
     setPast((items) => [...items, cloneSnapshot(before)].slice(-60));
     setFuture([]);
   }, []);
 
   useEffect(() => {
-    const pendingCrop = pendingCropRef.current?.dataUrl === capture.dataUrl
-      ? pendingCropRef.current
-      : null;
-    pendingCropRef.current = null;
     setReady(false);
     const image = new Image();
     image.onload = () => {
       imageRef.current = image;
-      const initialState = pendingCrop ?? initialDocumentStateRef.current;
+      const initialState = initialDocumentStateRef.current;
       setCallouts(cloneCallouts(initialState.callouts));
       setFocuses(cloneFocuses(initialState.focuses));
+      setCrop(cloneCrop(initialState.crop));
       setReady(true);
     };
     image.src = capture.dataUrl;
@@ -172,15 +188,16 @@ export function Editor({
     setEditingId(null);
     setCropRect(null);
     setZoom(null);
-  }, [capture.dataUrl, setCallouts, setFocuses]);
+  }, [capture.dataUrl, setCallouts, setCrop, setFocuses]);
 
   useEffect(() => {
     if (!ready) return;
     onDocumentChange({
       callouts: cloneCallouts(callouts),
-      focuses: cloneFocuses(focuses)
+      focuses: cloneFocuses(focuses),
+      crop: cloneCrop(crop)
     });
-  }, [callouts, focuses, onDocumentChange, ready]);
+  }, [callouts, crop, focuses, onDocumentChange, ready]);
 
   useEffect(() => {
     const element = workspaceRef.current;
@@ -202,8 +219,8 @@ export function Editor({
     const canvas = canvasRef.current;
     const image = imageRef.current;
     if (!canvas || !image || !ready) return;
-    drawScene(canvas.getContext("2d")!, image, callouts, focuses, selectedId, true, effectiveStyle);
-  }, [callouts, effectiveStyle, focuses, ready, selectedId]);
+    drawScene(canvas.getContext("2d")!, image, callouts, focuses, selectedId, true, effectiveStyle, viewport);
+  }, [callouts, effectiveStyle, focuses, ready, selectedId, viewport.height, viewport.width, viewport.x, viewport.y]);
 
   useEffect(() => {
     const context = canvasRef.current?.getContext("2d");
@@ -342,8 +359,8 @@ export function Editor({
   }): Point => {
     const rect = event.currentTarget.getBoundingClientRect();
     return {
-      x: ((event.clientX - rect.left) / rect.width) * capture.width,
-      y: ((event.clientY - rect.top) / rect.height) * capture.height
+      x: viewport.x + ((event.clientX - rect.left) / rect.width) * viewport.width,
+      y: viewport.y + ((event.clientY - rect.top) / rect.height) * viewport.height
     };
   };
 
@@ -362,20 +379,20 @@ export function Editor({
       return;
     }
     updateOne(id, (callout) => {
-      const measured = measureCalloutForText(context, text, capture.width - callout.x, effectiveStyle);
+      const measured = measureCalloutForText(context, text, viewportRight - callout.x, effectiveStyle);
       const width = Math.min(
-        capture.width,
+        viewport.width,
         callout.manualWidth ?? Math.max(callout.minimumWidth ?? 0, measured.width)
       );
       const height = Math.min(
-        capture.height,
+        viewport.height,
         measureCalloutHeightForWidth(context, text, width, effectiveStyle)
       );
       return {
         ...callout,
         text,
-        x: Math.min(callout.x, capture.width - width),
-        y: Math.min(callout.y, capture.height - height),
+        x: Math.max(viewport.x, Math.min(callout.x, viewportRight - width)),
+        y: Math.max(viewport.y, Math.min(callout.y, viewportBottom - height)),
         width,
         height
       };
@@ -385,8 +402,8 @@ export function Editor({
   const visibleCanvasCenter = () => {
     const canvas = canvasRef.current;
     const workspace = workspaceRef.current;
-    let centerX = capture.width / 2;
-    let centerY = capture.height / 2;
+    let centerX = viewport.x + viewport.width / 2;
+    let centerY = viewport.y + viewport.height / 2;
     if (canvas && workspace) {
       const canvasRect = canvas.getBoundingClientRect();
       const workspaceRect = workspace.getBoundingClientRect();
@@ -395,8 +412,8 @@ export function Editor({
       const visibleTop = Math.max(canvasRect.top, workspaceRect.top);
       const visibleBottom = Math.min(canvasRect.bottom, workspaceRect.bottom);
       if (visibleRight > visibleLeft && visibleBottom > visibleTop) {
-        centerX = (((visibleLeft + visibleRight) / 2 - canvasRect.left) / canvasRect.width) * capture.width;
-        centerY = (((visibleTop + visibleBottom) / 2 - canvasRect.top) / canvasRect.height) * capture.height;
+        centerX = viewport.x + (((visibleLeft + visibleRight) / 2 - canvasRect.left) / canvasRect.width) * viewport.width;
+        centerY = viewport.y + (((visibleTop + visibleBottom) / 2 - canvasRect.top) / canvasRect.height) * viewport.height;
       }
     }
     return { x: centerX, y: centerY };
@@ -406,20 +423,20 @@ export function Editor({
     const context = canvasRef.current?.getContext("2d");
     const width = Math.min(
       Math.max(minCalloutWidth(effectiveStyle), 360 * effectiveStyle.calloutScale),
-      capture.width
+      viewport.width
     );
     const height = Math.min(
       context
         ? measureCalloutHeightForWidth(context, "", width, effectiveStyle)
         : minCalloutHeight(effectiveStyle),
-      capture.height
+      viewport.height
     );
     const center = visibleCanvasCenter();
 
-    const x = Math.max(0, Math.min(capture.width - width, center.x - width / 2));
-    const y = Math.max(0, Math.min(capture.height - height, center.y - height / 2));
-    const targetX = x + width + 120 <= capture.width ? x + width + 120 : Math.max(0, x - 120);
-    const targetY = y + height + 80 <= capture.height ? y + height + 80 : Math.max(0, y - 80);
+    const x = Math.max(viewport.x, Math.min(viewportRight - width, center.x - width / 2));
+    const y = Math.max(viewport.y, Math.min(viewportBottom - height, center.y - height / 2));
+    const targetX = x + width + 120 <= viewportRight ? x + width + 120 : Math.max(viewport.x, x - 120);
+    const targetY = y + height + 80 <= viewportBottom ? y + height + 80 : Math.max(viewport.y, y - 80);
     const id = crypto.randomUUID();
     const before = currentSnapshot();
     setCallouts([
@@ -432,13 +449,13 @@ export function Editor({
   };
 
   const addFocus = () => {
-    const width = Math.min(420, capture.width);
-    const height = Math.min(240, capture.height);
+    const width = Math.min(420, viewport.width);
+    const height = Math.min(240, viewport.height);
     const center = visibleCanvasCenter();
     const focus: FocusRegion = {
       id: crypto.randomUUID(),
-      x: Math.max(0, Math.min(capture.width - width, center.x - width / 2)),
-      y: Math.max(0, Math.min(capture.height - height, center.y - height / 2)),
+      x: Math.max(viewport.x, Math.min(viewportRight - width, center.x - width / 2)),
+      y: Math.max(viewport.y, Math.min(viewportBottom - height, center.y - height / 2)),
       width,
       height
     };
@@ -450,13 +467,7 @@ export function Editor({
   };
 
   const startCrop = () => {
-    setCropRect({
-      id: "crop-region",
-      x: 0,
-      y: 0,
-      width: capture.width,
-      height: capture.height
-    });
+    setCropRect(cloneCrop(cropRef.current) ?? { ...fullViewport });
     setSelectedId(null);
     setEditingId(null);
   };
@@ -467,68 +478,19 @@ export function Editor({
   };
 
   const applyCrop = () => {
-    const image = imageRef.current;
-    if (!image || !cropRect) return;
+    if (!cropRect) return;
     const x = Math.max(0, Math.floor(cropRect.x));
     const y = Math.max(0, Math.floor(cropRect.y));
     const width = Math.max(1, Math.min(capture.width - x, Math.round(cropRect.width)));
     const height = Math.max(1, Math.min(capture.height - y, Math.round(cropRect.height)));
-    if (x === 0 && y === 0 && width === capture.width && height === capture.height) {
-      cancelCrop();
-      return;
-    }
-
-    const croppedCanvas = document.createElement("canvas");
-    croppedCanvas.width = width;
-    croppedCanvas.height = height;
-    croppedCanvas.getContext("2d")!.drawImage(image, x, y, width, height, 0, 0, width, height);
-    const dataUrl = croppedCanvas.toDataURL("image/png");
-
-    const nextCallouts = calloutsRef.current
-      .filter((callout) =>
-        callout.x < x + width && callout.x + callout.width > x &&
-        callout.y < y + height && callout.y + callout.height > y)
-      .map((callout) => {
-        const nextWidth = Math.min(callout.width, width);
-        const nextHeight = Math.min(callout.height, height);
-        return {
-          ...callout,
-          x: Math.max(0, Math.min(width - nextWidth, callout.x - x)),
-          y: Math.max(0, Math.min(height - nextHeight, callout.y - y)),
-          width: nextWidth,
-          height: nextHeight,
-          targetX: Math.max(0, Math.min(width, callout.targetX - x)),
-          targetY: Math.max(0, Math.min(height, callout.targetY - y)),
-          ...(callout.minimumWidth === undefined ? {} : { minimumWidth: Math.min(callout.minimumWidth, nextWidth) }),
-          ...(callout.manualWidth === undefined ? {} : { manualWidth: nextWidth })
-        };
-      });
-    const nextFocuses = focusesRef.current.flatMap((focus) => {
-      const left = Math.max(focus.x, x);
-      const top = Math.max(focus.y, y);
-      const right = Math.min(focus.x + focus.width, x + width);
-      const bottom = Math.min(focus.y + focus.height, y + height);
-      if (right <= left || bottom <= top) return [];
-      return [{
-        ...focus,
-        x: left - x,
-        y: top - y,
-        width: right - left,
-        height: bottom - top
-      }];
-    });
-
-    pendingCropRef.current = { dataUrl, callouts: nextCallouts, focuses: nextFocuses };
-    setReady(false);
+    const before = currentSnapshot();
+    const nextCrop = x === 0 && y === 0 && width === capture.width && height === capture.height
+      ? null
+      : { x, y, width, height };
+    setCrop(nextCrop);
     setCropRect(null);
     setZoom(null);
-    onCrop({
-      dataUrl,
-      width,
-      height,
-      originX: capture.originX + x,
-      originY: capture.originY + y
-    });
+    record(before);
   };
 
   const calloutHandleAt = (point: Point, callout: Callout): CalloutResizeHandle | null => {
@@ -540,7 +502,7 @@ export function Editor({
     return handles.find(([, handle]) => distance(point, handle) <= tolerance)?.[0] ?? null;
   };
 
-  const focusHandleAt = (point: Point, focus: FocusRegion): FocusResizeHandle | null => {
+  const focusHandleAt = (point: Point, focus: FocusRegion | CropRegion): FocusResizeHandle | null => {
     const tolerance = Math.max(10, 9 / cssScale);
     const centerX = focus.x + focus.width / 2;
     const centerY = focus.y + focus.height / 2;
@@ -643,8 +605,8 @@ export function Editor({
     if (drag.kind === "target") {
       updateOne(drag.id, (callout) => ({
         ...callout,
-        targetX: Math.max(0, Math.min(capture.width, point.x)),
-        targetY: Math.max(0, Math.min(capture.height, point.y))
+        targetX: Math.max(viewport.x, Math.min(viewportRight, point.x)),
+        targetY: Math.max(viewport.y, Math.min(viewportBottom, point.y))
       }));
       return;
     }
@@ -653,8 +615,8 @@ export function Editor({
       const dy = point.y - drag.start.y;
       updateOne(drag.id, (callout) => ({
         ...callout,
-        x: Math.max(0, Math.min(capture.width - callout.width, drag.original.x + dx)),
-        y: Math.max(0, Math.min(capture.height - callout.height, drag.original.y + dy))
+        x: Math.max(viewport.x, Math.min(viewportRight - callout.width, drag.original.x + dx)),
+        y: Math.max(viewport.y, Math.min(viewportBottom - callout.height, drag.original.y + dy))
       }));
       return;
     }
@@ -663,23 +625,23 @@ export function Editor({
       const dy = point.y - drag.start.y;
       updateFocus(drag.id, (focus) => ({
         ...focus,
-        x: Math.max(0, Math.min(capture.width - focus.width, drag.original.x + dx)),
-        y: Math.max(0, Math.min(capture.height - focus.height, drag.original.y + dy))
+        x: Math.max(viewport.x, Math.min(viewportRight - focus.width, drag.original.x + dx)),
+        y: Math.max(viewport.y, Math.min(viewportBottom - focus.height, drag.original.y + dy))
       }));
       return;
     }
 
     if (drag.kind === "resize-focus") {
-      const minimumWidth = Math.min(MIN_FOCUS_SIZE, capture.width);
-      const minimumHeight = Math.min(MIN_FOCUS_SIZE, capture.height);
+      const minimumWidth = Math.min(MIN_FOCUS_SIZE, viewport.width);
+      const minimumHeight = Math.min(MIN_FOCUS_SIZE, viewport.height);
       let left = drag.original.x;
       let top = drag.original.y;
       let right = drag.original.x + drag.original.width;
       let bottom = drag.original.y + drag.original.height;
-      if (drag.handle.includes("w")) left = Math.max(0, Math.min(point.x, right - minimumWidth));
-      if (drag.handle.includes("e")) right = Math.min(capture.width, Math.max(point.x, left + minimumWidth));
-      if (drag.handle.includes("n")) top = Math.max(0, Math.min(point.y, bottom - minimumHeight));
-      if (drag.handle.includes("s")) bottom = Math.min(capture.height, Math.max(point.y, top + minimumHeight));
+      if (drag.handle.includes("w")) left = Math.max(viewport.x, Math.min(point.x, right - minimumWidth));
+      if (drag.handle.includes("e")) right = Math.min(viewportRight, Math.max(point.x, left + minimumWidth));
+      if (drag.handle.includes("n")) top = Math.max(viewport.y, Math.min(point.y, bottom - minimumHeight));
+      if (drag.handle.includes("s")) bottom = Math.min(viewportBottom, Math.max(point.y, top + minimumHeight));
       updateFocus(drag.id, (focus) => ({
         ...focus,
         x: left,
@@ -693,22 +655,22 @@ export function Editor({
     // Callouts intentionally resize horizontally; their height remains text-derived.
     const context = canvasRef.current?.getContext("2d");
     const right = drag.original.x + drag.original.width;
-    const minimumWidth = Math.min(minCalloutWidth(effectiveStyle), capture.width);
+    const minimumWidth = Math.min(minCalloutWidth(effectiveStyle), viewport.width);
     let x = drag.original.x;
     let width = drag.original.width;
     if (drag.handle === "w") {
-      x = Math.min(point.x, right - minimumWidth);
+      x = Math.max(viewport.x, Math.min(point.x, right - minimumWidth));
       width = right - x;
     }
     if (drag.handle === "e") width = Math.max(minimumWidth, point.x - x);
-    width = Math.min(width, capture.width - x);
+    width = Math.min(width, viewportRight - x);
     const height = Math.min(
-      capture.height,
+      viewport.height,
       context
         ? measureCalloutHeightForWidth(context, drag.original.text, width, effectiveStyle)
         : drag.original.height
     );
-    const y = Math.max(0, Math.min(drag.original.y, capture.height - height));
+    const y = Math.max(viewport.y, Math.min(drag.original.y, viewportBottom - height));
     updateOne(drag.id, (callout) => ({
       ...callout,
       x,
@@ -736,15 +698,16 @@ export function Editor({
   const exportImage = async (settings: SaveSettings) => {
     const image = imageRef.current;
     if (!image) return;
+    const exportViewport = cropRef.current ?? fullViewport;
     const maxWidth = Math.max(0, Math.floor(Number(settings.maxWidth) || 0));
     const maxHeight = Math.max(0, Math.floor(Number(settings.maxHeight) || 0));
     const exportScale = Math.min(
       1,
-      maxWidth > 0 ? maxWidth / capture.width : 1,
-      maxHeight > 0 ? maxHeight / capture.height : 1
+      maxWidth > 0 ? maxWidth / exportViewport.width : 1,
+      maxHeight > 0 ? maxHeight / exportViewport.height : 1
     );
-    const exportWidth = Math.max(1, Math.round(capture.width * exportScale));
-    const exportHeight = Math.max(1, Math.round(capture.height * exportScale));
+    const exportWidth = Math.max(1, Math.round(exportViewport.width * exportScale));
+    const exportHeight = Math.max(1, Math.round(exportViewport.height * exportScale));
 
     setFormat(settings.format);
     setMaxWidthInput(settings.maxWidth);
@@ -758,14 +721,14 @@ export function Editor({
     setExporting(true);
     try {
       const sourceCanvas = document.createElement("canvas");
-      sourceCanvas.width = capture.width;
-      sourceCanvas.height = capture.height;
+      sourceCanvas.width = exportViewport.width;
+      sourceCanvas.height = exportViewport.height;
       const context = sourceCanvas.getContext("2d")!;
       if (settings.format === "jpeg") {
         context.fillStyle = "white";
         context.fillRect(0, 0, sourceCanvas.width, sourceCanvas.height);
       }
-      drawScene(context, image, calloutsRef.current, focusesRef.current, null, false, captureStyle);
+      drawScene(context, image, calloutsRef.current, focusesRef.current, null, false, captureStyle, exportViewport);
       const outputCanvas = exportScale < 1 ? document.createElement("canvas") : sourceCanvas;
       if (outputCanvas !== sourceCanvas) {
         outputCanvas.width = exportWidth;
@@ -792,8 +755,12 @@ export function Editor({
           <button disabled={Boolean(cropRect)} onClick={addFocus} title="Add a focus region">
             <FrameCorners size={17} weight="bold" /> Focus
           </button>
-          <button className={cropRect ? "active" : ""} onClick={cropRect ? cancelCrop : startCrop} title="Crop capture">
-            <Crop size={17} weight="bold" /> Crop
+          <button
+            className={cropRect || crop ? "active" : ""}
+            onClick={cropRect ? cancelCrop : startCrop}
+            title={crop ? "Edit crop using the original image" : "Crop capture"}
+          >
+            <Crop size={17} weight="bold" /> {crop && !cropRect ? "Edit crop" : "Crop"}
           </button>
         </div>
         <div className="tool-separator" />
@@ -813,14 +780,24 @@ export function Editor({
           </>
         )}
         <div className="editor-toolbar-spacer" />
-        <span className="image-size">{capture.width} × {capture.height}</span>
+        <span className="image-size">{Math.round(viewport.width)} × {Math.round(viewport.height)}</span>
         <div className="tool-group document-actions">
+          <button
+            className={replacementArmed ? "active" : ""}
+            disabled={Boolean(cropRect) || documentSaving}
+            onClick={onReplace}
+            title={replacementArmed ? "Cancel capture replacement" : "Replace the original capture and preserve edits"}
+          >
+            <ArrowClockwise size={17} weight="bold" /> {replacementArmed ? "Cancel replace" : "Replace"}
+          </button>
           <button className="document-save-button" disabled={documentSaving} onClick={() => void onSaveDocument(currentSnapshot(), false)} title="Save editable CapSage document">
             <FloppyDisk size={17} weight="bold" /> {documentSaving ? "Saving…" : "Save"}
           </button>
-          <button className="document-save-as-button" disabled={documentSaving} onClick={() => void onSaveDocument(currentSnapshot(), true)} title="Save editable document as…">
-            Save as…
-          </button>
+          {canSaveAs && (
+            <button className="document-save-as-button" disabled={documentSaving} onClick={() => void onSaveDocument(currentSnapshot(), true)} title="Save editable document as…">
+              Save as…
+            </button>
+          )}
         </div>
         <button className="save-button" disabled={exporting} onClick={() => setExportDialogOpen(true)}>
           <DownloadSimple size={17} weight="bold" /> {exporting ? "Exporting…" : "Export"}
@@ -840,12 +817,12 @@ export function Editor({
         <div className="canvas-scroll-area">
           <div
             className="canvas-stage"
-            style={{ width: capture.width * cssScale, height: capture.height * cssScale }}
+            style={{ width: viewport.width * cssScale, height: viewport.height * cssScale }}
           >
             <canvas
               ref={canvasRef}
-              width={capture.width}
-              height={capture.height}
+              width={viewport.width}
+              height={viewport.height}
               onPointerDown={onPointerDown}
               onPointerMove={onPointerMove}
               onPointerUp={onPointerUp}
@@ -864,8 +841,8 @@ export function Editor({
                 <div
                   className="crop-frame"
                   style={{
-                    left: cropRect.x * cssScale,
-                    top: cropRect.y * cssScale,
+                    left: (cropRect.x - viewport.x) * cssScale,
+                    top: (cropRect.y - viewport.y) * cssScale,
                     width: cropRect.width * cssScale,
                     height: cropRect.height * cssScale
                   }}
@@ -883,8 +860,8 @@ export function Editor({
                 value={selectedCallout.text}
                 placeholder="Callout text"
                 style={{
-                  left: (selectedCallout.x + effectiveCalloutPaddingX) * cssScale,
-                  top: (selectedCallout.y + effectiveCalloutPaddingY) * cssScale,
+                  left: (selectedCallout.x - viewport.x + effectiveCalloutPaddingX) * cssScale,
+                  top: (selectedCallout.y - viewport.y + effectiveCalloutPaddingY) * cssScale,
                   width: Math.max(30, (selectedCallout.width - effectiveCalloutPaddingX * 2) * cssScale),
                   height: Math.max(24, (selectedCallout.height - effectiveCalloutPaddingY * 2) * cssScale),
                   color: effectiveStyle.textColor,
@@ -929,8 +906,8 @@ export function Editor({
       {exportDialogOpen && (
         <SaveDialog
           settings={{ format, maxWidth: maxWidthInput, maxHeight: maxHeightInput }}
-          sourceWidth={capture.width}
-          sourceHeight={capture.height}
+          sourceWidth={crop?.width ?? capture.width}
+          sourceHeight={crop?.height ?? capture.height}
           onCancel={() => setExportDialogOpen(false)}
           onSave={(settings) => void exportImage(settings)}
         />

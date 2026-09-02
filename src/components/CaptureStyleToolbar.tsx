@@ -2,9 +2,7 @@ import { CaretDown, Check, Palette, PencilSimple } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import {
   ACTIVE_CAPTURE_STYLE_KEY,
-  CAPTURE_STYLES_KEY,
   DEFAULT_CAPTURE_STYLE,
-  loadCaptureStyles,
   type CaptureStyle
 } from "../editor/style";
 import { StyleDialog } from "./StyleDialog";
@@ -177,54 +175,41 @@ function StyleNameDialog({
 }
 
 interface Props {
-  hasCapture: boolean;
-  captureSession: number;
   initialStyle: CaptureStyle;
+  styles: CaptureStyle[];
+  onCreateStyle: (style: CaptureStyle) => void;
+  onDeleteStyle: (id: string) => void;
+  onSaveStyle: (style: CaptureStyle) => void;
   onStyleChange: (style: CaptureStyle) => void;
 }
 
-export function CaptureStyleToolbar({ hasCapture, captureSession, initialStyle, onStyleChange }: Props) {
-  const [styles, setStyles] = useState<CaptureStyle[]>(loadCaptureStyles);
-  const [activeStyleId, setActiveStyleId] = useState(() =>
-    localStorage.getItem(ACTIVE_CAPTURE_STYLE_KEY) ?? DEFAULT_CAPTURE_STYLE.id
-  );
-  const [appliedStyle, setAppliedStyle] = useState<CaptureStyle | null>(null);
+export function CaptureStyleToolbar({
+  initialStyle,
+  styles,
+  onCreateStyle,
+  onDeleteStyle,
+  onSaveStyle,
+  onStyleChange
+}: Props) {
   const [styleDraft, setStyleDraft] = useState<CaptureStyle | null>(null);
   const [pendingNewStyle, setPendingNewStyle] = useState<CaptureStyle | null>(null);
   const [suggestedStyleName, setSuggestedStyleName] = useState("");
-  const activeStyle = styles.find((style) => style.id === activeStyleId) ?? styles[0] ?? DEFAULT_CAPTURE_STYLE;
-  const captureStyle = appliedStyle ?? activeStyle;
-
-  useEffect(() => onStyleChange(captureStyle), [captureStyle, onStyleChange]);
-  useEffect(() => {
-    const savedStyle = styles.find((style) => style.id === initialStyle.id);
-    if (savedStyle && JSON.stringify(savedStyle) === JSON.stringify(initialStyle)) {
-      setActiveStyleId(savedStyle.id);
-      setAppliedStyle(null);
-    } else {
-      setAppliedStyle({ ...initialStyle });
-    }
-  }, [captureSession]);
-  useEffect(() => {
-    if (!hasCapture) setAppliedStyle(null);
-  }, [hasCapture]);
-
-  const persistStyles = (next: CaptureStyle[]) => {
-    setStyles(next);
-    localStorage.setItem(CAPTURE_STYLES_KEY, JSON.stringify(next));
-  };
+  const savedStyle = styles.find((style) => style.id === initialStyle.id);
+  const hasCaptureOverride = !savedStyle
+    || JSON.stringify(savedStyle) !== JSON.stringify(initialStyle);
+  const captureStyle = hasCaptureOverride ? initialStyle : savedStyle;
 
   const selectStyle = (id: string) => {
-    setAppliedStyle(null);
-    setActiveStyleId(id);
+    const selected = styles.find((style) => style.id === id);
+    if (!selected) return;
     localStorage.setItem(ACTIVE_CAPTURE_STYLE_KEY, id);
+    onStyleChange({ ...selected });
   };
 
   const saveStyleChanges = () => {
     if (!styleDraft) return;
     const saved = { ...styleDraft };
-    persistStyles(styles.map((style) => style.id === saved.id ? saved : style));
-    selectStyle(saved.id);
+    onSaveStyle(saved);
     setStyleDraft(null);
   };
 
@@ -241,22 +226,19 @@ export function CaptureStyleToolbar({ hasCapture, captureSession, initialStyle, 
       return "A style with this name already exists.";
     }
     const saved = { ...pendingNewStyle, id: crypto.randomUUID(), name };
-    persistStyles([...styles, saved]);
-    selectStyle(saved.id);
+    onCreateStyle(saved);
+    localStorage.setItem(ACTIVE_CAPTURE_STYLE_KEY, saved.id);
+    onStyleChange(saved);
     setPendingNewStyle(null);
     return null;
   };
 
   const deleteStyle = () => {
     if (!styleDraft || styleDraft.id === DEFAULT_CAPTURE_STYLE.id) return;
-    persistStyles(styles.filter((style) => style.id !== styleDraft.id));
-    selectStyle(DEFAULT_CAPTURE_STYLE.id);
-    setStyleDraft(null);
-  };
-
-  const applyStyleToCapture = () => {
-    if (!styleDraft || !hasCapture) return;
-    setAppliedStyle({ ...styleDraft });
+    if (localStorage.getItem(ACTIVE_CAPTURE_STYLE_KEY) === styleDraft.id) {
+      localStorage.setItem(ACTIVE_CAPTURE_STYLE_KEY, DEFAULT_CAPTURE_STYLE.id);
+    }
+    onDeleteStyle(styleDraft.id);
     setStyleDraft(null);
   };
 
@@ -266,24 +248,22 @@ export function CaptureStyleToolbar({ hasCapture, captureSession, initialStyle, 
         <span className="style-toolbar-label"><Palette size={15} weight="duotone" /> Style</span>
         <CaptureStyleDropdown
           styles={styles}
-          value={activeStyle.id}
+          value={initialStyle.id}
           displayStyle={captureStyle}
           onChange={selectStyle}
           onEdit={(style) => setStyleDraft({ ...style })}
         />
-        {appliedStyle && <span className="capture-style-override">Capture only</span>}
+        {hasCaptureOverride && <span className="capture-style-override">Capture only</span>}
       </div>
       {styleDraft && (
         <StyleDialog
           style={styleDraft}
           isOriginal={styleDraft.id === DEFAULT_CAPTURE_STYLE.id}
-          canApply={hasCapture}
           onChange={setStyleDraft}
           onCancel={() => setStyleDraft(null)}
           onReset={() => setStyleDraft({ ...DEFAULT_CAPTURE_STYLE })}
           onSave={saveStyleChanges}
           onSaveAs={requestSaveStyleAsNew}
-          onApply={applyStyleToCapture}
           onDelete={deleteStyle}
         />
       )}

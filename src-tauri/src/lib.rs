@@ -2,12 +2,14 @@ mod capture;
 mod document;
 mod updater;
 
-use std::sync::Mutex;
+use std::{path::Path, sync::Mutex};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, PhysicalPosition, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const CAPTURE_SHORTCUT: &str = "Ctrl+Alt+PrintScreen";
+
+struct PendingOpenDocument(Mutex<Option<String>>);
 
 struct ShortcutRegistration {
     inner: Mutex<ShortcutRegistrationState>,
@@ -16,6 +18,34 @@ struct ShortcutRegistration {
 struct ShortcutRegistrationState {
     shortcut: String,
     error: Option<String>,
+}
+
+fn capsage_document_from_args(args: &[String], cwd: &str) -> Option<String> {
+    args.iter().skip(1).find_map(|argument| {
+        let path = Path::new(argument);
+        let is_capsage = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("capsage"));
+        if !is_capsage {
+            return None;
+        }
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            Path::new(cwd).join(path)
+        };
+        Some(resolved.to_string_lossy().into_owned())
+    })
+}
+
+#[tauri::command]
+fn take_pending_open_document(state: State<'_, PendingOpenDocument>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
 }
 
 #[derive(serde::Serialize)]
@@ -50,6 +80,9 @@ fn register_capture_shortcut(app: &tauri::AppHandle, shortcut: &str) -> Result<(
 }
 
 fn restore_main_window(app: &tauri::AppHandle) {
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.destroy();
+    }
     if let Some(menu) = app.get_webview_window("tray-menu") {
         let _ = menu.destroy();
     }
@@ -261,15 +294,31 @@ pub fn run() {
         | tauri_plugin_window_state::StateFlags::DECORATIONS
         | tauri_plugin_window_state::StateFlags::FULLSCREEN;
 
+    let initial_args = std::env::args_os()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let initial_cwd = std::env::current_dir()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let initial_document = capsage_document_from_args(&initial_args, &initial_cwd);
+
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            if let Some(path) = capsage_document_from_args(&args, &cwd) {
+                let _ = app.emit("open-document-requested", path);
+            }
+            restore_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(window_state_flags)
-                .with_denylist(&["region-selector", "tray-menu"])
+                .with_denylist(&["splash", "region-selector", "tray-menu"])
                 .build(),
         )
+        .manage(PendingOpenDocument(Mutex::new(initial_document)))
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                 api.prevent_close();
@@ -341,6 +390,7 @@ pub fn run() {
             activate_tray_menu,
             close_tray_menu,
             show_capsage,
+            take_pending_open_document,
             exit_capsage,
             shortcut_status,
             suspend_capture_shortcut,
@@ -351,4 +401,24 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running CapSage");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_capsage_document_arguments_case_insensitively() {
+        let args = vec!["capsage.exe".into(), "Capture.CAPSAGE".into()];
+        assert_eq!(
+            capsage_document_from_args(&args, r"C:\Captures"),
+            Some(r"C:\Captures\Capture.CAPSAGE".into())
+        );
+    }
+
+    #[test]
+    fn ignores_unassociated_file_arguments() {
+        let args = vec!["capsage.exe".into(), "capture.png".into()];
+        assert_eq!(capsage_document_from_args(&args, r"C:\Captures"), None);
+    }
 }

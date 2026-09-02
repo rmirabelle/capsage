@@ -1,4 +1,4 @@
-import type { Callout, FocusRegion, Point } from "./types";
+import type { Callout, CropRegion, FocusRegion, Point } from "./types";
 
 export function normalizeRect(start: Point, end: Point) {
   return {
@@ -18,7 +18,7 @@ export function pointInCallout(point: Point, callout: Callout) {
   );
 }
 
-export function pointInFocus(point: Point, focus: FocusRegion) {
+export function pointInFocus(point: Point, focus: FocusRegion | CropRegion) {
   return (
     point.x >= focus.x &&
     point.x <= focus.x + focus.width &&

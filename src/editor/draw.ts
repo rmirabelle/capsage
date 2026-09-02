@@ -1,5 +1,5 @@
 import { arrowStart } from "./geometry";
-import type { Callout, FocusRegion } from "./types";
+import type { Callout, CropRegion, FocusRegion } from "./types";
 import {
   DEFAULT_CAPTURE_STYLE,
   FOCUS_BLUR,
@@ -22,7 +22,8 @@ function drawFocusEffect(
   ctx: CanvasRenderingContext2D,
   image: HTMLImageElement,
   focuses: FocusRegion[],
-  style: CaptureStyle
+  style: CaptureStyle,
+  viewport: CropRegion
 ) {
   if (!focuses.length) return;
 
@@ -34,7 +35,17 @@ function drawFocusEffect(
   effect.fillRect(0, 0, effectLayer.width, effectLayer.height);
   effect.globalAlpha = style.unfocusedOpacity;
   effect.filter = `blur(${FOCUS_BLUR}px)`;
-  effect.drawImage(image, 0, 0, effectLayer.width, effectLayer.height);
+  effect.drawImage(
+    image,
+    viewport.x,
+    viewport.y,
+    viewport.width,
+    viewport.height,
+    0,
+    0,
+    effectLayer.width,
+    effectLayer.height
+  );
   effect.filter = "none";
   effect.globalAlpha = 1;
   effect.globalCompositeOperation = "destination-out";
@@ -380,16 +391,44 @@ export function drawScene(
   focuses: FocusRegion[],
   selectedId?: string | null,
   includeSelection = true,
-  style: CaptureStyle = DEFAULT_CAPTURE_STYLE
+  style: CaptureStyle = DEFAULT_CAPTURE_STYLE,
+  viewport: CropRegion = {
+    x: 0,
+    y: 0,
+    width: image.naturalWidth,
+    height: image.naturalHeight
+  }
 ) {
+  const visibleCallouts = callouts.map((callout) => ({
+    ...callout,
+    x: callout.x - viewport.x,
+    y: callout.y - viewport.y,
+    targetX: callout.targetX - viewport.x,
+    targetY: callout.targetY - viewport.y
+  }));
+  const visibleFocuses = focuses.map((focus) => ({
+    ...focus,
+    x: focus.x - viewport.x,
+    y: focus.y - viewport.y
+  }));
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-  ctx.drawImage(image, 0, 0, ctx.canvas.width, ctx.canvas.height);
-  drawFocusEffect(ctx, image, focuses, style);
-  callouts.forEach((callout) => drawCallout(ctx, callout, style));
+  ctx.drawImage(
+    image,
+    viewport.x,
+    viewport.y,
+    viewport.width,
+    viewport.height,
+    0,
+    0,
+    ctx.canvas.width,
+    ctx.canvas.height
+  );
+  drawFocusEffect(ctx, image, visibleFocuses, style, viewport);
+  visibleCallouts.forEach((callout) => drawCallout(ctx, callout, style));
 
   if (!includeSelection || !selectedId) return;
-  const selectedCallout = callouts.find((callout) => callout.id === selectedId);
-  const selectedFocus = focuses.find((focus) => focus.id === selectedId);
+  const selectedCallout = visibleCallouts.find((callout) => callout.id === selectedId);
+  const selectedFocus = visibleFocuses.find((focus) => focus.id === selectedId);
   const selected = selectedCallout ?? selectedFocus;
   if (!selected) return;
 

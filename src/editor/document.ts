@@ -1,12 +1,13 @@
 import type { CaptureStyle } from "./style";
-import type { Callout, CaptureResult, FocusRegion } from "./types";
+import type { Callout, CaptureResult, CropRegion, FocusRegion } from "./types";
 
 export const CAPSAGE_DOCUMENT_FORMAT = "capsage-document";
-export const CAPSAGE_DOCUMENT_VERSION = 1;
+export const CAPSAGE_DOCUMENT_VERSION = 2;
 
 export interface EditorDocumentState {
   callouts: Callout[];
   focuses: FocusRegion[];
+  crop: CropRegion | null;
 }
 
 export interface CapSageDocumentManifest {
@@ -25,6 +26,7 @@ export interface CapSageDocumentManifest {
   captureStyle: CaptureStyle;
   callouts: Callout[];
   focusRegions: FocusRegion[];
+  crop: CropRegion | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -84,6 +86,21 @@ const parseFocus = (value: unknown): FocusRegion => {
   };
 };
 
+const parseCrop = (value: unknown): CropRegion | null => {
+  if (value === null || value === undefined) return null;
+  if (!isRecord(value)) throw new Error("The document contains an invalid crop region.");
+  const crop = {
+    x: requiredNumber(value, "x"),
+    y: requiredNumber(value, "y"),
+    width: requiredNumber(value, "width"),
+    height: requiredNumber(value, "height")
+  };
+  if (crop.width <= 0 || crop.height <= 0) {
+    throw new Error("The document contains an empty crop region.");
+  }
+  return crop;
+};
+
 const parseCaptureStyle = (value: unknown): CaptureStyle => {
   if (!isRecord(value)) throw new Error("The document contains an invalid capture style.");
   return {
@@ -122,7 +139,8 @@ export const createManifest = (
     },
     captureStyle: { ...captureStyle },
     callouts: state.callouts.map((callout) => ({ ...callout })),
-    focusRegions: state.focuses.map((focus) => ({ ...focus }))
+    focusRegions: state.focuses.map((focus) => ({ ...focus })),
+    crop: state.crop ? { ...state.crop } : null
   };
 };
 
@@ -136,7 +154,7 @@ export const parseManifest = (manifestJson: string) => {
   if (!isRecord(value) || value.format !== CAPSAGE_DOCUMENT_FORMAT) {
     throw new Error("This is not a CapSage document.");
   }
-  if (value.formatVersion !== CAPSAGE_DOCUMENT_VERSION) {
+  if (value.formatVersion !== 1 && value.formatVersion !== CAPSAGE_DOCUMENT_VERSION) {
     throw new Error(`CapSage cannot open document format version ${String(value.formatVersion)}.`);
   }
   if (!Array.isArray(value.callouts) || !Array.isArray(value.focusRegions)) {
@@ -147,9 +165,10 @@ export const parseManifest = (manifestJson: string) => {
     captureStyle: parseCaptureStyle(value.captureStyle),
     state: {
       callouts: value.callouts.map(parseCallout),
-      focuses: value.focusRegions.map(parseFocus)
+      focuses: value.focusRegions.map(parseFocus),
+      crop: parseCrop(value.crop)
     } satisfies EditorDocumentState
   };
 };
 
-export const emptyDocumentState = (): EditorDocumentState => ({ callouts: [], focuses: [] });
+export const emptyDocumentState = (): EditorDocumentState => ({ callouts: [], focuses: [], crop: null });
