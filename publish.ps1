@@ -111,8 +111,13 @@ if ($LASTEXITCODE -ne 0 -or $origin -notmatch 'github\.com[/:]rmirabelle/capsage
 gh auth status | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "GitHub CLI is not authenticated. Run: gh auth login -h github.com" }
 
+# gh writes "release not found" to stderr; under Stop that would abort the script.
+$previousErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 gh release view $tag *> $null
-if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists." }
+$releaseExists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $previousErrorActionPreference
+if ($releaseExists) { throw "Release $tag already exists." }
 
 Write-Host "==> Building CapSage $tag ..." -ForegroundColor Cyan
 npm run tauri build
