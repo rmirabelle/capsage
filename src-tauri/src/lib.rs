@@ -1,3 +1,4 @@
+mod browse;
 mod capture;
 mod document;
 mod updater;
@@ -387,6 +388,11 @@ pub fn run() {
             capture::save_image,
             document::open_capture_file,
             document::save_capsage_document,
+            browse::list_browse_directory,
+            browse::browse_places,
+            browse::rename_browse_entry,
+            browse::delete_browse_entry,
+            browse::copy_browse_entry,
             activate_tray_menu,
             close_tray_menu,
             show_capsage,

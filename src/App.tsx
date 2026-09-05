@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { save } from "@tauri-apps/plugin-dialog";
 import {
   Camera,
   CheckCircle,
@@ -18,6 +18,7 @@ import {
 import { Editor } from "./components/Editor";
 import { AboutDialog } from "./components/AboutDialog";
 import { CaptureStyleToolbar } from "./components/CaptureStyleToolbar";
+import { OpenDialog } from "./components/OpenDialog";
 import { formatShortcut, ShortcutDialog, shortcutTokens } from "./components/ShortcutDialog";
 import { TitleBar } from "./components/TitleBar";
 import {
@@ -227,6 +228,7 @@ export default function App() {
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [openDialogOpen, setOpenDialogOpen] = useState(false);
   const [pendingCloseDocumentId, setPendingCloseDocumentId] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState("");
   const [startupUpdate, setStartupUpdate] = useState<UpdateInfo | null>(null);
@@ -583,28 +585,13 @@ export default function App() {
     }
   }, [addDocument, beginUnsavedDocument, restoreMainWindow, showNotice]);
 
-  const openFile = useCallback(async () => {
+  const openFile = useCallback(() => {
     if (!isTauri()) {
       showNotice({ tone: "error", message: "Opening files is available in the CapSage desktop app." });
       return;
     }
-    try {
-      const chosen = await open({
-        title: "Open a CapSage document or image",
-        multiple: false,
-        directory: false,
-        filters: [
-          { name: "CapSage documents and images", extensions: ["capsage", "png", "jpg", "jpeg"] },
-          { name: "CapSage document", extensions: ["capsage"] },
-          { name: "PNG or JPEG image", extensions: ["png", "jpg", "jpeg"] }
-        ]
-      });
-      if (!chosen || Array.isArray(chosen)) return;
-      await openCapturePath(chosen);
-    } catch (error) {
-      showNotice({ tone: "error", message: String(error) });
-    }
-  }, [openCapturePath, showNotice]);
+    setOpenDialogOpen(true);
+  }, [showNotice]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -740,7 +727,7 @@ export default function App() {
         <button
           className="button secondary capture-open-button"
           type="button"
-          onClick={() => void openFile()}
+          onClick={openFile}
           title="Open a CapSage document"
         >
           <FolderOpen size={16} weight="bold" /> Open
@@ -904,6 +891,15 @@ export default function App() {
           error={shortcutError}
           onCancel={() => void closeShortcutDialog()}
           onSave={saveShortcut}
+        />
+      )}
+      {openDialogOpen && (
+        <OpenDialog
+          onCancel={() => setOpenDialogOpen(false)}
+          onOpen={(path) => {
+            setOpenDialogOpen(false);
+            void openCapturePath(path);
+          }}
         />
       )}
       {aboutOpen && (
