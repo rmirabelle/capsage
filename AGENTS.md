@@ -9,8 +9,9 @@
   decision.
 - Keep `src-tauri/installer.nsi`, the bundled `icons/icon.ico` resource, and the
   Windows GUI-subsystem attribute intact.
-- Always build and manually verify the local installer before publishing. A local
-  build is not authorization to publish.
+- When the user says to publish (for example "let's publish"), finish the whole
+  publish process. Do not stop to ask the user to test the local installer. A
+  local build alone is not authorization to publish.
 - Use `set-version.ps1` and `publish.ps1`; do not manually create release tags or
   GitHub releases.
 - Inside those scripts, call `git`, `gh`, `npm`, and `cargo` only through the

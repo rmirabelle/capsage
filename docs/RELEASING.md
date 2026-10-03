@@ -50,8 +50,10 @@ generated executable and NSIS script again after the release build.
    npm run tauri build
    ```
 
-4. Install that exact local NSIS bundle from
-   `src-tauri\target\release\bundle\nsis` and manually verify:
+4. Optional: the user may install that exact local NSIS bundle from
+   `src-tauri\target\release\bundle\nsis` and manually verify the items below.
+   When the user says to publish, skip this step and continue; do not stop to
+   ask for a local installer test.
 
    - no console window appears;
    - CapSage starts tray-only;
@@ -74,8 +76,7 @@ generated executable and NSIS script again after the release build.
 7. Confirm the printed release URL and test the app's update check if the release
    is intended to update an older installed version.
 
-Do not run `publish.ps1` until the local installer has passed the manual check.
-The script creates and verifies the new public release first, then deletes every
+Run `publish.ps1` when the user says to publish. The script creates and verifies the new public release first, then deletes every
 older release and its tag. If verification fails before cleanup, older releases
 are intentionally preserved.
 
