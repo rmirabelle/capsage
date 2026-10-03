@@ -2,6 +2,7 @@ import {
   ArrowCounterClockwise,
   ArrowClockwise,
   ChatCenteredText,
+  Check,
   Crop,
   DownloadSimple,
   FloppyDisk,
@@ -39,6 +40,9 @@ type FocusResizeHandle = "nw" | "n" | "ne" | "w" | "e" | "sw" | "s" | "se";
 type EditorSnapshot = { callouts: Callout[]; focuses: FocusRegion[]; crop: CropRegion | null };
 type PanState = { pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number };
 type DrawTool = "focus" | "crop";
+type CropDragState =
+  | { kind: "move"; start: Point; original: CropRegion }
+  | { kind: "resize"; handle: FocusResizeHandle; original: CropRegion };
 type DragState =
   | { kind: "move-callout"; id: string; start: Point; original: Callout; before: EditorSnapshot }
   | { kind: "resize-callout"; id: string; handle: CalloutResizeHandle; original: Callout; before: EditorSnapshot }
@@ -91,6 +95,7 @@ export function Editor({
   const focusesRef = useRef<FocusRegion[]>([]);
   const dragRef = useRef<DragState | null>(null);
   const drawStartRef = useRef<Point | null>(null);
+  const cropDragRef = useRef<CropDragState | null>(null);
   const initialDocumentStateRef = useRef(initialDocumentState);
   initialDocumentStateRef.current = initialDocumentState;
   const cropRef = useRef<CropRegion | null>(cloneCrop(initialDocumentState.crop));
@@ -115,6 +120,7 @@ export function Editor({
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [drawTool, setDrawTool] = useState<DrawTool | null>(null);
   const [drawRect, setDrawRect] = useState<CropRegion | null>(null);
+  const [cropRect, setCropRect] = useState<CropRegion | null>(null);
 
   const fullViewport: CropRegion = { x: 0, y: 0, width: capture.width, height: capture.height };
   const viewport = drawTool === "crop" ? fullViewport : crop ?? fullViewport;
@@ -185,8 +191,10 @@ export function Editor({
     setSelectedId(null);
     setEditingId(null);
     drawStartRef.current = null;
+    cropDragRef.current = null;
     setDrawTool(null);
     setDrawRect(null);
+    setCropRect(null);
     setZoom(null);
   }, [capture.dataUrl, setCallouts, setCrop, setFocuses]);
 
@@ -328,7 +336,9 @@ export function Editor({
       if (drawTool) {
         if (event.key === "Escape") {
           drawStartRef.current = null;
+          cropDragRef.current = null;
           setDrawRect(null);
+          setCropRect(null);
           setDrawTool(null);
         }
         return;
@@ -451,7 +461,9 @@ export function Editor({
 
   const startDraw = (tool: DrawTool) => {
     drawStartRef.current = null;
+    cropDragRef.current = null;
     setDrawRect(null);
+    setCropRect(null);
     setDrawTool(tool);
     setSelectedId(null);
     setEditingId(null);
@@ -459,7 +471,9 @@ export function Editor({
 
   const cancelDraw = () => {
     drawStartRef.current = null;
+    cropDragRef.current = null;
     setDrawRect(null);
+    setCropRect(null);
     setDrawTool(null);
   };
 
@@ -497,23 +511,32 @@ export function Editor({
     const height = Math.min(viewport.height, Math.max(minimum, rect.height));
     const left = Math.max(viewport.x, Math.min(viewportRight - width, rect.x));
     const top = Math.max(viewport.y, Math.min(viewportBottom - height, rect.y));
-    const before = currentSnapshot();
 
+    // The drawn crop opens the adjustable crop frame; Apply commits it.
     if (drawTool === "crop") {
-      const x = Math.max(0, Math.floor(left));
-      const y = Math.max(0, Math.floor(top));
-      const cropWidth = Math.max(1, Math.min(capture.width - x, Math.round(width)));
-      const cropHeight = Math.max(1, Math.min(capture.height - y, Math.round(height)));
-      setCrop(x === 0 && y === 0 && cropWidth === capture.width && cropHeight === capture.height
-        ? null
-        : { x, y, width: cropWidth, height: cropHeight });
-      setZoom(null);
-    } else {
-      const focus: FocusRegion = { id: crypto.randomUUID(), x: left, y: top, width, height };
-      setFocuses([...focusesRef.current, focus]);
-      setSelectedId(focus.id);
+      setCropRect({ x: left, y: top, width, height });
+      return;
     }
+    const before = currentSnapshot();
+    const focus: FocusRegion = { id: crypto.randomUUID(), x: left, y: top, width, height };
+    setFocuses([...focusesRef.current, focus]);
+    setSelectedId(focus.id);
     setDrawTool(null);
+    record(before);
+  };
+
+  const applyCrop = () => {
+    if (!cropRect) return;
+    const x = Math.max(0, Math.floor(cropRect.x));
+    const y = Math.max(0, Math.floor(cropRect.y));
+    const width = Math.max(1, Math.min(capture.width - x, Math.round(cropRect.width)));
+    const height = Math.max(1, Math.min(capture.height - y, Math.round(cropRect.height)));
+    const before = currentSnapshot();
+    setCrop(x === 0 && y === 0 && width === capture.width && height === capture.height
+      ? null
+      : { x, y, width, height });
+    cancelDraw();
+    setZoom(null);
     record(before);
   };
 
@@ -549,6 +572,17 @@ export function Editor({
     const point = pointFromEvent(event);
     event.currentTarget.setPointerCapture(event.pointerId);
 
+    if (cropRect) {
+      const handle = focusHandleAt(point, cropRect);
+      if (handle) {
+        cropDragRef.current = { kind: "resize", handle, original: { ...cropRect } };
+        return;
+      }
+      if (pointInFocus(point, cropRect)) {
+        cropDragRef.current = { kind: "move", start: point, original: { ...cropRect } };
+        return;
+      }
+    }
     if (drawTool) {
       const start = {
         x: Math.max(viewport.x, Math.min(viewportRight, point.x)),
@@ -596,6 +630,33 @@ export function Editor({
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const cropDrag = cropDragRef.current;
+    if (cropDrag && cropRect && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      const point = pointFromEvent(event);
+      if (cropDrag.kind === "move") {
+        const dx = point.x - cropDrag.start.x;
+        const dy = point.y - cropDrag.start.y;
+        setCropRect({
+          ...cropRect,
+          x: Math.max(0, Math.min(capture.width - cropDrag.original.width, cropDrag.original.x + dx)),
+          y: Math.max(0, Math.min(capture.height - cropDrag.original.height, cropDrag.original.y + dy))
+        });
+      } else {
+        const minimumWidth = Math.min(32, capture.width);
+        const minimumHeight = Math.min(32, capture.height);
+        let left = cropDrag.original.x;
+        let top = cropDrag.original.y;
+        let right = cropDrag.original.x + cropDrag.original.width;
+        let bottom = cropDrag.original.y + cropDrag.original.height;
+        if (cropDrag.handle.includes("w")) left = Math.max(0, Math.min(point.x, right - minimumWidth));
+        if (cropDrag.handle.includes("e")) right = Math.min(capture.width, Math.max(point.x, left + minimumWidth));
+        if (cropDrag.handle.includes("n")) top = Math.max(0, Math.min(point.y, bottom - minimumHeight));
+        if (cropDrag.handle.includes("s")) bottom = Math.min(capture.height, Math.max(point.y, top + minimumHeight));
+        setCropRect({ ...cropRect, x: left, y: top, width: right - left, height: bottom - top });
+      }
+      return;
+    }
+
     const drawStart = drawStartRef.current;
     if (drawStart && event.currentTarget.hasPointerCapture(event.pointerId)) {
       setDrawRect(rectFromPoints(drawStart, pointFromEvent(event)));
@@ -686,6 +747,11 @@ export function Editor({
   };
 
   const onPointerUp = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (cropDragRef.current) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      cropDragRef.current = null;
+      return;
+    }
     const drawStart = drawStartRef.current;
     if (drawStart) {
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -784,8 +850,8 @@ export function Editor({
           <>
             <div className="tool-separator" />
             <span className="crop-size">
-              {drawRect
-                ? `${Math.round(drawRect.width)} × ${Math.round(drawRect.height)}`
+              {drawRect ?? cropRect
+                ? `${Math.round((drawRect ?? cropRect)!.width)} × ${Math.round((drawRect ?? cropRect)!.height)}`
                 : `Drag to draw the ${drawTool} area`}
             </span>
             <div className="tool-group crop-actions">
@@ -793,6 +859,9 @@ export function Editor({
                 <button onClick={removeCrop}><Trash size={16} /> Remove crop</button>
               )}
               <button onClick={cancelDraw}><XCircle size={16} /> Cancel</button>
+              {cropRect && (
+                <button className="apply-crop-button" onClick={applyCrop}><Check size={16} weight="bold" /> Apply crop</button>
+              )}
             </div>
           </>
         )}
@@ -845,6 +914,7 @@ export function Editor({
               onPointerUp={onPointerUp}
               onPointerCancel={() => {
                 drawStartRef.current = null;
+                cropDragRef.current = null;
                 setDrawRect(null);
               }}
               onDoubleClick={(event) => {
@@ -868,6 +938,23 @@ export function Editor({
                     height: drawRect.height * cssScale
                   }}
                 />
+              </div>
+            )}
+            {cropRect && !drawRect && (
+              <div className="crop-mask" aria-hidden="true">
+                <div
+                  className="crop-frame"
+                  style={{
+                    left: (cropRect.x - viewport.x) * cssScale,
+                    top: (cropRect.y - viewport.y) * cssScale,
+                    width: cropRect.width * cssScale,
+                    height: cropRect.height * cssScale
+                  }}
+                >
+                  {(["nw", "n", "ne", "w", "e", "sw", "s", "se"] as FocusResizeHandle[]).map((handle) => (
+                    <i key={handle} className={`crop-handle crop-handle-${handle}`} />
+                  ))}
+                </div>
               </div>
             )}
             {editingId && selectedCallout && (
